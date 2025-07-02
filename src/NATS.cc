@@ -4,6 +4,7 @@
 #include <mutex>
 
 #include "zeek/ID.h"
+#include "zeek/Val.h"
 
 #include "Plugin.h"
 

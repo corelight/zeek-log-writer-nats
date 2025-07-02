@@ -30,10 +30,10 @@ protected:
     bool DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) override;
     bool DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) override;
     bool DoSetBuf(bool enabled) override { return true; }
-    bool DoRotate(const char* rotated_path, double open, double close, bool terminating);
+    bool DoRotate(const char* rotated_path, double open, double close, bool terminating) override;
     bool DoFlush(double network_time) override;
     bool DoFinish(double network_time) override;
-    bool DoHeartbeat(double network_time, double current_time);
+    bool DoHeartbeat(double network_time, double current_time) override;
 
     // Try connect and setup the stream.
     bool Connect();
