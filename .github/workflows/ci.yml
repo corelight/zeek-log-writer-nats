@@ -10,7 +10,7 @@ jobs:
     strategy:
       matrix:
         image:
-          - zeek-6.0
+          - zeek-7.0
           - zeek-dev
     steps:
     - uses: actions/checkout@v4
