@@ -6,6 +6,10 @@
 #
 # @TEST-DOC: Configure just a single stream with sensor.logs.* subject.
 
+@if ( Version::number >= 70100 )
+@load policy/protocols/conn/disable-unknown-ip-proto-support
+@endif
+
 redef NATS::publish_subject_template = "test-sensor.logs.{path}";
 redef NATS::stream_name_template = "test-sensor-logs";
 redef NATS::stream_subject_template = "test-sensor.logs.*";
