@@ -14,9 +14,9 @@
 @load policy/protocols/dns/disable-opcode-log-fields
 @endif
 
-redef NATS::publish_subject_template = "test-sensor.logs.{path}";
-redef NATS::stream_name_template = "test-sensor-logs";
-redef NATS::stream_subject_template = "test-sensor.logs.*";
+redef LogNATS::publish_subject_template = "test-sensor.logs.{path}";
+redef LogNATS::stream_name_template = "test-sensor-logs";
+redef LogNATS::stream_subject_template = "test-sensor.logs.*";
 
 redef Log::default_writer=Log::WRITER_NATS;
 

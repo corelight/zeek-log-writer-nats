@@ -1,4 +1,4 @@
-# @TEST-EXEC: zeek -NN Zeek::NATS | sed -e 's/version.*)/version)/g' >output
+# @TEST-EXEC: zeek -NN Zeek::Log_Writer_NATS | sed -e 's/version.*)/version)/g' >output
 # @TEST-EXEC: btest-diff output
 
 @if ( Version::number >= 70100 )

@@ -1,13 +1,15 @@
-Zeek NATS log writer
-====================
+# Zeek Log Writer NATS
 
 Provides a Zeek log writer implementation for the [NATS.io Connective Technology](https://nats.io/)
 [JetStream](https://docs.nats.io/nats-concepts/jetstream) persistence system.
 
-Requirements and Installation
------------------------------
+## Requirements and Installation
 
-This plugin has a build dependency on the `libnats-dev` package on a Debian-like system.
+This plugin has a build dependency on the [nats.c](https://github.com/nats-io/nats.c) client library.
+The build system automatically detects whether the library was installed via apt or vcpkg,
+and both produce identical builds.
+
+**Using apt (Debian/Ubuntu):**
 
 ```bash
 $ apt-get update && apt-get install libnats-dev
@@ -15,15 +17,33 @@ $ ./configure && make
 $ sudo make install
 ```
 
+**Using vcpkg:**
 
-Testing
--------
+```bash
+$ vcpkg install cnats
+$ ./configure && make
+$ sudo make install
+```
+
+The build will first look for the system `libnats-dev` library. If not found, it falls back
+to vcpkg's `cnats` package.
+
+```bash
+$ vcpkg install cnats
+$ ./configure && make
+$ sudo make install
+```
+
+The build will first look for the system `libnats-dev` library. If not found, it falls back
+to vcpkg's `cnats` package.
+
+## Testing
 
 After compiling and installing the plugin, verify Zeek is able to load the plugin:
 
 ```bash
-$ zeek -NN Zeek::NATS
-Zeek::NATS - Log writer sending to NATS (dynamic, version 0.0.6)
+$ zeek -NN Zeek::Log_Writer_NATS
+Zeek::Log_Writer_NATS - Log writer sending to NATS (dynamic, version 0.0.6)
     [Writer] NATS (Log::WRITER_NATS)
 ```
 
@@ -31,6 +51,7 @@ Testing against a locally running NATS server can be done as follows:
 
 Start a NATS server in one terminal, by default it'll listen on port 4222 which
 is also used in the plugin by default.
+
 ```bash
 $ nats-server -js
 ```
@@ -43,6 +64,7 @@ $ zeek -C -i lo Log::default_writer=Log::WRITER_NATS
 
 In yet another terminal, subscribe to the default subject used by the plugin,
 using the `nats` CLI. This will show all logs produced by the Zeek instance.
+
 ```bash
 $ nats subscribe 'sensor.logs.*'
 17:51:56 Subscribing on sensor.logs.*
