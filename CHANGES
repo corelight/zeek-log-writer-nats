@@ -1,3 +1,17 @@
+0.1.0-7 | 2026-02-18 17:36:50 +0100
+
+  * Bump pre-commit-config versions (Arne Welzel, Corelight)
+
+  * docker/testing: Support latest Zeek versions (Arne Welzel, Corelight)
+
+  * Replace ODesc::Len() with ODesc::Size() usage (Arne Welzel, Corelight)
+
+    Removed from latest Zeek and replaced with Size().
+
+  * Disable ip_proto logging in btests, upgrade to Zeek 7.0 for CI (Tim Wojtulewicz, Corelight)
+
+  * Fix a couple of minor build issues (Tim Wojtulewicz, Corelight)
+
 0.1.0 | 2024-02-27 15:53:20 +0100
 
   * Connect: Log connection errors. Fix order of cleanup. (Arne Welzel, Corelight)

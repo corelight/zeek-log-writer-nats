@@ -8,6 +8,10 @@
 @load policy/protocols/conn/disable-unknown-ip-proto-support
 @endif
 
+@if ( Version::number >= 80100 )
+@load policy/protocols/dns/disable-opcode-log-fields
+@endif
+
 redef Log::default_writer=Log::WRITER_NATS;
 
 redef NATS::stream_name_template = "test-sensor-logs-{path}";

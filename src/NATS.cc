@@ -221,7 +221,7 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
         return false;
 
     const char* data = (const char*)desc.Bytes();
-    int data_len = desc.Len();
+    int data_len = desc.Size();
 
     natsMsg* msg;
     if ( s = natsMsg_Create(&msg, publish_subject.c_str(), nullptr /*reply*/, data, data_len); s != NATS_OK ) {
