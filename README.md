@@ -1,5 +1,4 @@
-Zeek NATS log writer
-====================
+# Zeek log writer NATS
 
 Provides a Zeek log writer implementation for the [NATS.io Connective Technology](https://nats.io/)
 [JetStream](https://docs.nats.io/nats-concepts/jetstream) persistence system.
