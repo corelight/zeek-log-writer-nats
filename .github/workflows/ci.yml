@@ -14,6 +14,5 @@ jobs:
           - zeek-dev
     steps:
     - uses: actions/checkout@v4
-    - run: |
-        docker build -t ${{ matrix.image }}-nats -f docker/${{ matrix.image }}.Dockerfile .
-        docker run --rm ${{ matrix.image }}-nats /zeek-nats/testing/container.sh
+    - run: docker build -t ${{ matrix.image }}-nats -f docker/${{ matrix.image }}.Dockerfile .
+    - run: docker run --rm ${{ matrix.image }}-nats /zeek-nats/testing/container.sh
