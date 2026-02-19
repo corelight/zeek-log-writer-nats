@@ -23,4 +23,4 @@ WORKDIR /zeek-nats
 RUN git config --global --add safe.directory $(pwd)
 COPY ./ .
 RUN ./configure && make
-RUN ZEEK_PLUGIN_PATH=./build zeek -N Zeek::NATS
+RUN ZEEK_PLUGIN_PATH=./build zeek -N Zeek::Log_Writer_NATS

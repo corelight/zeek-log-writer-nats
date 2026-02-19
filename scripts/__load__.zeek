@@ -1,4 +1,4 @@
-module NATS;
+module LogNATS;
 
 export {
 	type StreamStorage: enum {

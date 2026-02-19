@@ -9,7 +9,7 @@
 #include "Plugin.h"
 
 using namespace zeek::logging;
-using namespace zeek::plugin::Zeek_NATS::detail;
+using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
 
 NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {}
 NATSWriter::~NATSWriter() {
@@ -67,19 +67,19 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
     debug("DoInit %s", info.path);
     natsStatus s = NATS_OK;
 
-    url = zeek::id::find_val<zeek::StringVal>("NATS::url")->ToStdString();
-    publish_subject_template = zeek::id::find_val<zeek::StringVal>("NATS::publish_subject_template")->ToStdString();
-    stream_name_template = zeek::id::find_val<zeek::StringVal>("NATS::stream_name_template")->ToStdString();
-    stream_subject_template = zeek::id::find_val<zeek::StringVal>("NATS::stream_subject_template")->ToStdString();
-    stream_storage = zeek::id::find_val<zeek::StringVal>("NATS::stream_storage")->AsEnum();
-    include_unset_fields = zeek::id::find_val<BoolVal>("NATS::include_unset_fields")->AsBool();
-    publish_error_log = zeek::id::find_val<BoolVal>("NATS::publish_error_log")->AsCount();
-    dropped_writes_log = zeek::id::find_val<BoolVal>("NATS::dropped_writes_log")->AsCount();
-    publish_async_max_pending = zeek::id::find_val<BoolVal>("NATS::publish_async_max_pending")->AsInt();
+    url = zeek::id::find_val<zeek::StringVal>("LogNATS::url")->ToStdString();
+    publish_subject_template = zeek::id::find_val<zeek::StringVal>("LogNATS::publish_subject_template")->ToStdString();
+    stream_name_template = zeek::id::find_val<zeek::StringVal>("LogNATS::stream_name_template")->ToStdString();
+    stream_subject_template = zeek::id::find_val<zeek::StringVal>("LogNATS::stream_subject_template")->ToStdString();
+    stream_storage = zeek::id::find_val<zeek::StringVal>("LogNATS::stream_storage")->AsEnum();
+    include_unset_fields = zeek::id::find_val<BoolVal>("LogNATS::include_unset_fields")->AsBool();
+    publish_error_log = zeek::id::find_val<BoolVal>("LogNATS::publish_error_log")->AsCount();
+    dropped_writes_log = zeek::id::find_val<BoolVal>("LogNATS::dropped_writes_log")->AsCount();
+    publish_async_max_pending = zeek::id::find_val<BoolVal>("LogNATS::publish_async_max_pending")->AsInt();
     publish_async_stall_wait_ms =
-        static_cast<int64_t>(zeek::id::find_val<BoolVal>("NATS::publish_async_stall_wait")->AsInterval() * 1000);
-    publish_async_complete_max_wait_ms =
-        static_cast<int64_t>(zeek::id::find_val<BoolVal>("NATS::publish_async_complete_max_wait")->AsInterval() * 1000);
+        static_cast<int64_t>(zeek::id::find_val<BoolVal>("LogNATS::publish_async_stall_wait")->AsInterval() * 1000);
+    publish_async_complete_max_wait_ms = static_cast<int64_t>(
+        zeek::id::find_val<BoolVal>("LogNATS::publish_async_complete_max_wait")->AsInterval() * 1000);
 
     for ( const auto& [name, value] : info.config ) {
         if ( zeek::util::streq(name, "url") ) {

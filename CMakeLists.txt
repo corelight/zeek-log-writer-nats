@@ -1,17 +1,25 @@
 cmake_minimum_required(VERSION 3.15.0 FATAL_ERROR)
 
-project(ZeekNATS)
+project(Zeek_Log_Writer_NATS)
+
+find_package(Zeek CONFIG REQUIRED)
+set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${Zeek_DIR})
+set(BRO_PLUGIN_INSTALL_ROOT ${CMAKE_INSTALL_PREFIX}/lib/zeek/plugins)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Try FindLibNATS first (looking for libnats-dev), fall back to cnats
 list(PREPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
-
-find_package(LibNATS REQUIRED)
-
-message(STATUS "LIBNATS libraries: ${LIBNATS_LIBRARIES}")
-message(STATUS "LIBNATS include: ${LIBNATS_INCLUDE_DIRS}")
-
-include_directories(BEFORE ${LIBNATS_INCLUDE_DIRS})
+find_package(LibNATS QUIET)
+if (LibNATS_FOUND)
+    message(STATUS "Found libnats via FindLibNATS: ${LIBNATS_LIBRARIES}")
+    set(NATS_LIBRARIES ${LIBNATS_LIBRARIES})
+    include_directories(BEFORE ${LIBNATS_INCLUDE_DIRS})
+else ()
+    find_package(cnats CONFIG REQUIRED)
+    message(STATUS "Found cnats via CMake config (vcpkg)")
+    set(NATS_LIBRARIES cnats::nats)
+endif ()
 
 # Establish version numbers in config.h
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" VERSION LIMIT_COUNT 1)
@@ -27,10 +35,10 @@ configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/config.h.in" "${CMAKE_CURRENT_BI
 
 include(ZeekPlugin)
 
-zeek_plugin_begin(Zeek NATS)
+zeek_plugin_begin(Zeek Log_Writer_NATS)
 zeek_plugin_cc(src/Plugin.cc)
 zeek_plugin_cc(src/NATS.cc)
-zeek_plugin_link_library(${LIBNATS_LIBRARIES})
+zeek_plugin_link_library(${NATS_LIBRARIES})
 
 zeek_plugin_dist_files(README.md CHANGES COPYING VERSION)
 zeek_plugin_end()

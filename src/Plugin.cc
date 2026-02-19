@@ -17,17 +17,17 @@
 #include "NATS.h"
 #include "config.h"
 
-namespace zeek::plugin::Zeek_NATS {
+namespace zeek::plugin::Zeek_Log_Writer_NATS {
 Plugin plugin;
 }
 
-using namespace zeek::plugin::Zeek_NATS;
+using namespace zeek::plugin::Zeek_Log_Writer_NATS;
 
 zeek::plugin::Configuration Plugin::Configure() {
     AddComponent(new zeek::logging::Component("NATS", detail::NATSWriter::Instantiate));
 
     zeek::plugin::Configuration config;
-    config.name = "Zeek::NATS";
+    config.name = "Zeek::Log_Writer_NATS";
     config.description = "Log writer sending to NATS";
     config.version.major = VERSION_MAJOR;
     config.version.minor = VERSION_MINOR;

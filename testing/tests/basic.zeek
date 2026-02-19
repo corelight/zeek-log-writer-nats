@@ -14,10 +14,10 @@
 
 redef Log::default_writer=Log::WRITER_NATS;
 
-redef NATS::stream_name_template = "test-sensor-logs-{path}";
-redef NATS::publish_subject_template = "test-sensor.logs.{path}";
-redef NATS::stream_subject_template = "test-sensor.logs.{path}";
-redef NATS::stream_subject_template = "test-sensor.logs.{path}";
+redef LogNATS::stream_name_template = "test-sensor-logs-{path}";
+redef LogNATS::publish_subject_template = "test-sensor.logs.{path}";
+redef LogNATS::stream_subject_template = "test-sensor.logs.{path}";
+redef LogNATS::stream_subject_template = "test-sensor.logs.{path}";
 
 event zeek_init()
 	{

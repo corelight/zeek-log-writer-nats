@@ -10,7 +10,7 @@
 
 using namespace zeek::logging;
 
-namespace zeek::plugin::Zeek_NATS::detail {
+namespace zeek::plugin::Zeek_Log_Writer_NATS::detail {
 
 struct NATSWriterStats {
     zeek_uint_t dropped_writes = 0;
@@ -65,4 +65,4 @@ private:
     int64_t publish_async_stall_wait_ms;
     int64_t publish_async_complete_max_wait_ms;
 };
-} // namespace zeek::plugin::Zeek_NATS::detail
+} // namespace zeek::plugin::Zeek_Log_Writer_NATS::detail
