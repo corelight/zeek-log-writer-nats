@@ -1,5 +1,6 @@
 #pragma once
 #include <zeek/plugin/Plugin.h>
+#include <zeek/telemetry/Gauge.h>
 
 namespace zeek::plugin {
 namespace Zeek_Log_Writer_NATS {
@@ -14,6 +15,7 @@ protected:
 
 private:
     void* unused = nullptr;
+    zeek::telemetry::GaugePtr connections_gauge;
 };
 
 extern Plugin plugin;

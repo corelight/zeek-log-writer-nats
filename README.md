@@ -72,3 +72,29 @@ $ nats subscribe 'sensor.logs.*'
 {"ts":1708620711.443446,"uid":"Cbsjg31hoFHw6fkJch","id.orig_h":"172.17.0.2","id.orig_p":47476,"id.resp_h":"192.0.78.212","id.resp_p":443,"proto":"tcp","service":"ssl","duration":2.2717180252075195,"orig_bytes":758,"resp_bytes":86930,"conn_state":"SF","local_orig":true,"local_resp":false,"missed_bytes":0,"history":"ShADadFf","orig_pkts":48,"orig_ip_bytes":2698,"resp_pkts":48,"resp_ip_bytes":88862}
 
 ```
+
+## Connections and Flow Control
+
+Zeek runs one log writer per log path, each on its own thread. All writers
+of a Zeek process that publish to the same `url` share a single NATS
+connection and JetStream context. Writers configured with a different `url`
+through a filter's `$config` table get their own connection.
+
+Because the connection is shared, `LogNATS::publish_async_max_pending`
+(default 256) limits the outstanding asynchronous publishes of all log
+paths combined, not per log path. Once the limit is reached, a write
+waits up to `LogNATS::publish_async_stall_wait` for acknowledgements. If
+none arrive in time, the write is dropped and counted in
+`zeek_nats_log_writer_backend_dropped_writes_total`. Set the limit to 0
+for no limit.
+
+If connecting to the server fails, writes are dropped until the next
+attempt. Attempts are spaced using exponential backoff with jitter,
+between 1 and 30 seconds.
+
+Publish acknowledgements and errors are attributed to writers by the
+subject of the published message. If multiple writers publish on the same
+subject, they're attributed to the first of them.
+
+The `zeek_nats_log_writer_connections` gauge reports the number of
+established NATS connections of the Zeek process.

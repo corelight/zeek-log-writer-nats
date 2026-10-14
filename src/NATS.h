@@ -9,15 +9,11 @@
 #include "zeek/telemetry/Counter.h"
 #include "zeek/threading/formatters/JSON.h"
 
+#include "SharedClient.h"
+
 using namespace zeek::logging;
 
 namespace zeek::plugin::Zeek_Log_Writer_NATS::detail {
-
-struct NATSWriterStats {
-    std::atomic<zeek_uint_t> dropped_writes = 0;
-    std::atomic<zeek_uint_t> publish_errors = 0;
-    std::atomic<zeek_uint_t> publish_acks = 0;
-};
 
 class NATSWriter : public WriterBackend {
 public:
@@ -25,12 +21,6 @@ public:
     ~NATSWriter() override;
 
     static WriterBackend* Instantiate(WriterFrontend* frontend) { return new NATSWriter(frontend); }
-
-    // Callback for message acknowledgements.
-    void PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate);
-
-    // Callback for message delivery errors.
-    void PublishError(int code, const char* text);
 
 protected:
     bool DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) override;
@@ -41,14 +31,17 @@ protected:
     bool DoFinish(double network_time) override;
     bool DoHeartbeat(double network_time, double current_time) override;
 
-    // Try connect and setup the stream.
-    bool Connect();
+    // Returns the shared JetStream context, connecting and setting up
+    // the stream if needed. Returns nullptr if not connected.
+    jsCtx* Connect();
+
+    // Counts and logs a write that was dropped.
+    void DroppedWrite();
 
 private:
-    natsConnection* conn = nullptr;
-    natsOptions* opts = nullptr;
-    jsCtx* js = nullptr;
-    jsOptions jsOpts;
+    std::shared_ptr<SharedClient> client;
+    jsCtx* js = nullptr; // Owned by client.
+    bool stream_added = false;
     std::string url;
     std::string stream_name_template;
     std::string stream_subject_template;
@@ -66,8 +59,7 @@ private:
     bool create_stream;
     std::string json_timestamps;
 
-    NATSWriterStats writer_stats;
-    zeek_uint_t publish_error_log;
+    std::shared_ptr<NATSWriterStats> writer_stats;
     zeek_uint_t dropped_writes_log;
     int64_t publish_async_max_pending;
     int64_t publish_async_stall_wait_ms;

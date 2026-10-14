@@ -3,4 +3,4 @@ set -x
 
 # Cleanup all testing streams
 nats stream rm -f test-sensor-logs || true
-for s in dns http conn ssl ; do nats stream rm -f test-sensor-logs-${s} || true; done
+for s in dns http conn conn-other ssl ; do nats stream rm -f test-sensor-logs-${s} || true; done
