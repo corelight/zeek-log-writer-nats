@@ -85,8 +85,12 @@ Because the connection is shared, `LogNATS::publish_async_max_pending`
 paths combined, not per log path. Once the limit is reached, a write
 waits up to `LogNATS::publish_async_stall_wait` for acknowledgements. If
 none arrive in time, the write is dropped and counted in
-`zeek_nats_log_writer_backend_dropped_writes_total`. Set the limit to 0
-for no limit.
+`zeek_nats_log_writer_backend_dropped_writes_total`. Until the server
+responds again, further writes of that log path are dropped right away
+instead of each waiting, apart from one attempt per second. This also
+means that during a server outage writes are dropped once the limit is
+reached, rather than buffered by the NATS client until it reconnects.
+Set the limit to 0 for no limit.
 
 If connecting to the server fails, writes are dropped until the next
 attempt. Attempts are spaced using exponential backoff with jitter,

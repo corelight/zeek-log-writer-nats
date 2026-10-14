@@ -234,11 +234,34 @@ void NATSWriter::DroppedWrite() {
     writer_stats->dropped_writes++;
 }
 
+bool NATSWriter::SkipStalledPublish() {
+    if ( ! stalled )
+        return false;
+
+    // Once the server responds again, publish as usual.
+    if ( client->Responses() != stalled_responses ) {
+        stalled = false;
+        return false;
+    }
+
+    // Otherwise, drop writes rather than having each of them wait for
+    // publish_async_stall_wait, e.g. when Zeek flushes logs at shutdown
+    // while the server is unavailable. Still attempt a publish now and
+    // then in case the pending messages never get a response.
+    constexpr auto stalled_publish_interval = std::chrono::seconds(1);
+    return std::chrono::steady_clock::now() - last_stalled_publish < stalled_publish_interval;
+}
+
 bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) {
     natsStatus s = NATS_OK;
     jsErrCode jerr;
 
     if ( ! Connect() ) {
+        DroppedWrite();
+        return true;
+    }
+
+    if ( SkipStalledPublish() ) {
         DroppedWrite();
         return true;
     }
@@ -256,11 +279,18 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
         return false;
     }
 
-    if ( s = js_PublishMsgAsync(js, &msg, NULL); s != NATS_OK ) {
+    if ( s = js_PublishMsgAsync(js, &msg, NULL); s == NATS_OK ) {
+        stalled = false;
+    }
+    else {
         // NATS_TIMEOUT means publish_async_max_pending messages were
         // in flight for longer than publish_async_stall_wait.
-        if ( s == NATS_TIMEOUT )
+        if ( s == NATS_TIMEOUT ) {
+            stalled = true;
+            stalled_responses = client->Responses();
+            last_stalled_publish = std::chrono::steady_clock::now();
             DroppedWrite();
+        }
         else
             writer_stats->PublishError(s, nats_GetLastError(nullptr));
     }

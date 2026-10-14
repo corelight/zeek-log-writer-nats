@@ -1,6 +1,7 @@
 #pragma once
 
 #include <nats/nats.h>
+#include <chrono>
 #include <memory>
 #include <vector>
 
@@ -38,10 +39,20 @@ protected:
     // Counts and logs a write that was dropped.
     void DroppedWrite();
 
+    // Returns true if a publish should be skipped because an earlier one
+    // stalled and the server hasn't responded to anything since.
+    bool SkipStalledPublish();
+
 private:
     std::shared_ptr<SharedClient> client;
     jsCtx* js = nullptr; // Owned by client.
     bool stream_added = false;
+
+    // Set when a publish timed out waiting for publish_async_max_pending
+    // to free up, along with the client's response count at that time.
+    bool stalled = false;
+    uint64_t stalled_responses = 0;
+    std::chrono::steady_clock::time_point last_stalled_publish;
     std::string url;
     std::string stream_name_template;
     std::string stream_subject_template;

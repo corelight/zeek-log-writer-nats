@@ -191,6 +191,8 @@ std::shared_ptr<NATSWriterStats> SharedClient::LookupStats(const char* subject) 
 }
 
 void SharedClient::OnPublishAck(natsMsg* msg, jsPubAck* pa, jsPubAckErr* pae) {
+    ++responses;
+
     // Acks for messages of a writer that has since been removed are ignored.
     auto stats = LookupStats(natsMsg_GetSubject(msg));
     if ( ! stats )

@@ -51,6 +51,10 @@ public:
     // Number of established connections in this process.
     static int64_t Connections() { return connections; }
 
+    // Number of publish acknowledgements and errors received from the
+    // server so far, used to detect whether publishing makes progress.
+    uint64_t Responses() const { return responses; }
+
     explicit SharedClient(SharedClientOptions opts);
     ~SharedClient();
 
@@ -87,6 +91,8 @@ private:
     unsigned int connect_failures = 0;
     std::chrono::steady_clock::time_point next_connect_attempt;
     std::mt19937 rng;
+
+    std::atomic<uint64_t> responses = 0;
 
     std::mutex stats_mtx;
     std::map<std::string, std::vector<std::shared_ptr<NATSWriterStats>>, std::less<>> stats_by_subject;
