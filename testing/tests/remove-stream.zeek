@@ -64,6 +64,35 @@ function print_metrics(label: string)
 		print l;
 	}
 
+function metric(name: string, path: string): double
+	{
+	local total = 0.0;
+	for ( _, m in Telemetry::collect_metrics("zeek_nats_log_writer*", "*") )
+		if ( m$opts$name == name && (path == "" || m$label_values[1] == path) )
+			total += m$value;
+	return total;
+	}
+
+function acks(path: string): double
+	{
+	return metric("zeek_nats_log_writer_backend_publish_acks_total", path);
+	}
+
+function connections(): double
+	{
+	return metric("zeek_nats_log_writer_connections", "");
+	}
+
+# Calls then() once cond() holds, or after 5 seconds so that the
+# test fails on the baseline diff rather than hanging.
+event wait_until(cond: function(): bool, then: function(), tries: count &default=500)
+	{
+	if ( cond() || tries == 0 )
+		then();
+	else
+		schedule 10msec { wait_until(cond, then, tries - 1) };
+	}
+
 event finish()
 	{
 	terminate();
@@ -76,14 +105,14 @@ event after_removal()
 	# Only B keeps publishing.
 	write_msgs(B, "b", 5, 10);
 
-	schedule 500msec { finish() };
+	event wait_until(function(): bool { return acks("test-b") >= 10; }, function() { event finish(); });
 	}
 
 event remove_a()
 	{
 	print_metrics("before-removal");
 	Log::remove_stream(A);
-	schedule 500msec { after_removal() };
+	event after_removal();
 	}
 
 event zeek_init()
@@ -96,13 +125,11 @@ event zeek_init()
 	write_msgs(A, "a", 0, 5);
 	write_msgs(B, "b", 0, 5);
 
-	schedule 500msec { remove_a() };
+	event wait_until(function(): bool { return acks("test-a") >= 5 && acks("test-b") >= 5; },
+	                 function() { event remove_a(); });
 	}
 
 event zeek_done()
 	{
-	# Give the log writer threads a bit of time to process all the acks
-	# and update the metrics.
-	sleep(50msec);
 	print_metrics("done");
 	}

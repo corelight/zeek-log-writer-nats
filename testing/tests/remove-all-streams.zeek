@@ -64,6 +64,35 @@ function print_metrics(label: string)
 		print l;
 	}
 
+function metric(name: string, path: string): double
+	{
+	local total = 0.0;
+	for ( _, m in Telemetry::collect_metrics("zeek_nats_log_writer*", "*") )
+		if ( m$opts$name == name && (path == "" || m$label_values[1] == path) )
+			total += m$value;
+	return total;
+	}
+
+function acks(path: string): double
+	{
+	return metric("zeek_nats_log_writer_backend_publish_acks_total", path);
+	}
+
+function connections(): double
+	{
+	return metric("zeek_nats_log_writer_connections", "");
+	}
+
+# Calls then() once cond() holds, or after 5 seconds so that the
+# test fails on the baseline diff rather than hanging.
+event wait_until(cond: function(): bool, then: function(), tries: count &default=500)
+	{
+	if ( cond() || tries == 0 )
+		then();
+	else
+		schedule 10msec { wait_until(cond, then, tries - 1) };
+	}
+
 event finish()
 	{
 	terminate();
@@ -72,7 +101,7 @@ event finish()
 event after_recreate()
 	{
 	print_metrics("after-recreate");
-	schedule 100msec { finish() };
+	event finish();
 	}
 
 event recreate()
@@ -86,7 +115,7 @@ event recreate()
 
 	write_msgs(C, "c", 0, 5);
 
-	schedule 500msec { after_recreate() };
+	event wait_until(function(): bool { return acks("test-c") >= 5; }, function() { event after_recreate(); });
 	}
 
 event remove_all()
@@ -94,7 +123,9 @@ event remove_all()
 	print_metrics("before-removal");
 	Log::remove_stream(A);
 	Log::remove_stream(B);
-	schedule 500msec { recreate() };
+
+	# The connection is closed once both writers are destroyed.
+	event wait_until(function(): bool { return connections() == 0; }, function() { event recreate(); });
 	}
 
 event zeek_init()
@@ -107,11 +138,11 @@ event zeek_init()
 	write_msgs(A, "a", 0, 5);
 	write_msgs(B, "b", 0, 5);
 
-	schedule 500msec { remove_all() };
+	event wait_until(function(): bool { return acks("test-a") >= 5 && acks("test-b") >= 5; },
+	                 function() { event remove_all(); });
 	}
 
 event zeek_done()
 	{
-	sleep(50msec);
 	print_metrics("done");
 	}
