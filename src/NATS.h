@@ -70,6 +70,12 @@ private:
     bool create_stream;
     std::string json_timestamps;
 
+    // Name and index of the string field published as the message body
+    // instead of the formatted record, if any.
+    std::string raw_body_field;
+    int raw_body_field_index = -1;
+    bool raw_body_fallback_warned = false;
+
     std::shared_ptr<NATSWriterStats> writer_stats;
     zeek_uint_t dropped_writes_log;
     int64_t publish_async_max_pending;

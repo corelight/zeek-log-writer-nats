@@ -102,3 +102,23 @@ subject, they're attributed to the first of them.
 
 The `zeek_nats_log_writer_connections` gauge reports the number of
 established NATS connections of the Zeek process.
+
+## Raw Message Bodies
+
+Some logs carry a pre-formatted payload in a single string field, for
+example an event that already arrived as JSON from another tool. For such
+log paths, the writer can publish that field's value as the message body
+as-is, instead of the JSON formatted record:
+
+```zeek
+redef LogNATS::raw_body_fields += { ["my_path"] = "payload" };
+```
+
+A filter's `$config` table can set the field with `raw_body_field`, which
+overrides `LogNATS::raw_body_fields` for that filter's path. An empty value
+disables raw bodies for the path.
+
+If the field doesn't exist or isn't a string, the writer reports a warning
+at startup and publishes JSON formatted records. If a record's field is
+empty or unset, that record is published JSON formatted, and the writer
+reports a warning the first time this happens.

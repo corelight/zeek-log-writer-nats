@@ -50,6 +50,9 @@ NATSWriter::NATSWriter(WriterFrontend* frontend)
     include_unset_fields = zeek::id::find_val<zeek::BoolVal>("LogNATS::include_unset_fields")->AsBool();
     create_stream = zeek::id::find_val<zeek::BoolVal>("LogNATS::create_stream")->AsBool();
     json_timestamps = zeek::obj_desc_short(zeek::id::find_val("LogNATS::json_timestamps").get());
+    auto raw_body_fields = zeek::id::find_val<zeek::TableVal>("LogNATS::raw_body_fields");
+    if ( auto field = raw_body_fields->FindOrDefault(zeek::make_intrusive<zeek::StringVal>(frontend->Info().path)) )
+        raw_body_field = field->AsStringVal()->ToStdString();
     writer_stats->publish_error_log = zeek::id::find_val("LogNATS::publish_error_log")->AsCount();
     dropped_writes_log = zeek::id::find_val("LogNATS::dropped_writes_log")->AsCount();
     publish_async_max_pending = zeek::id::find_val("LogNATS::publish_async_max_pending")->AsInt();
@@ -109,6 +112,9 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         else if ( zeek::util::streq(name, "json_timestamps") ) {
             json_timestamps = value;
         }
+        else if ( zeek::util::streq(name, "raw_body_field") ) {
+            raw_body_field = value;
+        }
         else if ( zeek::util::streq(name, "include_unset_fields") ) {
             if ( zeek::util::streq(value, "T") ) {
                 include_unset_fields = true;
@@ -167,6 +173,21 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         return false;
     }
     formatter = std::make_unique<zeek::threading::formatter::JSON>(this, tf, include_unset_fields);
+
+    if ( ! raw_body_field.empty() ) {
+        int i = 0;
+        while ( i < arg_num_fields && raw_body_field != arg_fields[i]->name )
+            i++;
+
+        if ( i == arg_num_fields )
+            Warning(Fmt("NATS: Raw body field %s not found, publishing JSON formatted records instead",
+                        raw_body_field.c_str()));
+        else if ( arg_fields[i]->type != zeek::TYPE_STRING )
+            Warning(Fmt("NATS: Raw body field %s is not a string, publishing JSON formatted records instead",
+                        raw_body_field.c_str()));
+        else
+            raw_body_field_index = i;
+    }
 
     writer_stats->name = Name();
     client = SharedClient::Acquire({.url = url,
@@ -266,12 +287,28 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
         return true;
     }
 
-    desc.Clear();
-    if ( ! formatter->Describe(&desc, num_fields, fields, vals) )
-        return false;
+    const char* data;
+    int data_len;
 
-    const char* data = (const char*)desc.Bytes();
-    int data_len = desc.Size();
+    const auto* raw_body = raw_body_field_index >= 0 ? vals[raw_body_field_index] : nullptr;
+    if ( raw_body && raw_body->present && raw_body->val.string_val.length > 0 ) {
+        data = raw_body->val.string_val.data;
+        data_len = static_cast<int>(raw_body->val.string_val.length);
+    }
+    else {
+        if ( raw_body && ! raw_body_fallback_warned ) {
+            Warning(Fmt("NATS: Raw body field %s is empty or unset, publishing the JSON formatted record instead",
+                        raw_body_field.c_str()));
+            raw_body_fallback_warned = true;
+        }
+
+        desc.Clear();
+        if ( ! formatter->Describe(&desc, num_fields, fields, vals) )
+            return false;
+
+        data = (const char*)desc.Bytes();
+        data_len = desc.Size();
+    }
 
     natsMsg* msg;
     if ( s = natsMsg_Create(&msg, publish_subject.c_str(), nullptr /*reply*/, data, data_len); s != NATS_OK ) {

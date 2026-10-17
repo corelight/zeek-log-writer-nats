@@ -27,6 +27,11 @@ export {
 	# JSON::TS_MILLIS, JSON::TS_MILLIS_UNSIGNED, JSON::TS_ISO8601.
 	global json_timestamps: JSON::TimestampFormat = JSON::TS_EPOCH &redef;
 
+	# Maps a log path to the name of one of its string fields. For these
+	# paths, the field's value is published as the message body as-is,
+	# instead of the JSON formatted record.
+	global raw_body_fields: table[string] of string = {} &redef;
+
 	# By default, zeek-log-writer-nats will automatically create a JetStream
 	# stream to publish on. If create_stream is false, then the stream must be
 	# created and configured manually to work with zeek-log-writer-nats.
