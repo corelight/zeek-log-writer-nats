@@ -32,6 +32,14 @@ export {
 	# created and configured manually to work with zeek-log-writer-nats.
 	global create_stream: bool = T &redef;
 
+	# Escape the log path before substituting it for {path} in the
+	# templates above. Bytes outside [A-Za-z0-9_-] become %XX (for
+	# example "conn.new" becomes "conn%2Enew"), so the path is always
+	# one subject token and a valid stream name. Consumers recover the
+	# original path by percent-decoding the token. Set to F to substitute
+	# the raw path, e.g. to map "." in paths onto subject hierarchy.
+	global escape_path: bool = T &redef;
+
 	# Log every n'th asynchronous publish error, or
 	# none if set to 0. By default, log each of them.
 	global publish_error_log = 1 &redef;

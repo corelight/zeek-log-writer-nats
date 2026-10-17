@@ -64,6 +64,7 @@ private:
     zeek::ODesc desc;
     bool include_unset_fields;
     bool create_stream;
+    bool escape_path;
     std::string json_timestamps;
 
     NATSWriterStats writer_stats;

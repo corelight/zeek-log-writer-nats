@@ -1,6 +1,7 @@
 #include "NATS.h"
 
 #include <nats/nats.h>
+#include <cctype>
 #include <cstdio>
 #include <mutex>
 
@@ -47,6 +48,7 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
     stream_storage = zeek::id::find_val("LogNATS::stream_storage")->AsEnum();
     include_unset_fields = zeek::id::find_val<zeek::BoolVal>("LogNATS::include_unset_fields")->AsBool();
     create_stream = zeek::id::find_val<zeek::BoolVal>("LogNATS::create_stream")->AsBool();
+    escape_path = zeek::id::find_val<zeek::BoolVal>("LogNATS::escape_path")->AsBool();
     json_timestamps = zeek::obj_desc_short(zeek::id::find_val("LogNATS::json_timestamps").get());
     publish_error_log = zeek::id::find_val("LogNATS::publish_error_log")->AsCount();
     dropped_writes_log = zeek::id::find_val("LogNATS::dropped_writes_log")->AsCount();
@@ -105,6 +107,28 @@ std::string template_replace(std::string tmpl, std::vector<Replace>& replacement
 
     return tmpl;
 }
+
+// Escape a log path so it is a single, safe NATS subject token and a
+// valid stream name. Bytes outside [A-Za-z0-9_-] become %XX, including
+// '%' itself, so the original path can be recovered by percent-decoding.
+// Paths such as "conn", "dhcp_fp" or "conn-0" are left as they are.
+std::string escape_path_token(const std::string& path) {
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(path.size());
+    for ( unsigned char c : path ) {
+        if ( std::isalnum(c) || c == '_' || c == '-' ) {
+            out += static_cast<char>(c);
+        }
+        else {
+            out += '%';
+            out += hex[c >> 4];
+            out += hex[c & 0x0F];
+        }
+    }
+
+    return out;
+}
 } // namespace
 
 void NATSWriter::PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate) {
@@ -158,6 +182,18 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
                 return false;
             }
         }
+        else if ( zeek::util::streq(name, "escape_path") ) {
+            if ( zeek::util::streq(value, "T") ) {
+                escape_path = true;
+            }
+            else if ( zeek::util::streq(value, "F") ) {
+                escape_path = false;
+            }
+            else {
+                Error(Fmt("NATS: Unknown value for escape_path %s:%s", name, value));
+                return false;
+            }
+        }
         else if ( zeek::util::streq(name, "create_stream") ) {
             if ( zeek::util::streq(value, "T") ) {
                 create_stream = true;
@@ -176,7 +212,8 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         }
     }
 
-    std::vector<Replace> replacements({{"{path}", info.path}});
+    std::string path = escape_path ? escape_path_token(info.path) : info.path;
+    std::vector<Replace> replacements({{"{path}", path}});
 
     stream_name = template_replace(stream_name_template, replacements);
     publish_subject = template_replace(publish_subject_template, replacements);
