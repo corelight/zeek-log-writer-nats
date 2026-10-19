@@ -73,11 +73,21 @@ $ nats subscribe 'sensor.logs.*'
 
 ```
 
-## Flow Control
+## Connections and Flow Control
+
+Zeek runs one log writer per log path, each on its own thread. By default
+(`LogNATS::share_connection = T`), all writers of a Zeek process that
+publish to the same `url` share a single NATS connection and JetStream
+context. Writers configured with a different `url` through a filter's
+`$config` table get their own connection. With
+`redef LogNATS::share_connection = F;`, every writer uses its own
+connection.
 
 `LogNATS::publish_async_max_pending` (default 256) limits the outstanding
-asynchronous publishes of a log path, that is, messages the server hasn't
-acknowledged yet. Once the limit is reached, a write waits up to
+asynchronous publishes, that is, messages the server hasn't acknowledged
+yet. With a shared connection, the limit applies to all log paths
+publishing to the same `url` combined, otherwise to each log path
+separately. Once the limit is reached, a write waits up to
 `LogNATS::publish_async_stall_wait` for acknowledgements. If none arrive in
 time, the write is dropped and counted in
 `zeek_nats_log_writer_backend_dropped_writes_total`. Until the server
@@ -86,3 +96,15 @@ instead of each waiting, apart from one attempt per second. This also
 means that during a server outage writes are dropped once the limit is
 reached, rather than buffered by the NATS client until it reconnects.
 Set the limit to 0 for no limit.
+
+If connecting to the server fails, writes are dropped until the next
+attempt. Attempts are spaced using exponential backoff with jitter,
+between 1 and 30 seconds. With a shared connection, a single writer
+attempts to connect at a time.
+
+Publish acknowledgements and errors are attributed to writers by the
+subject of the published message. If multiple writers share a connection
+and publish on the same subject, they're attributed to the first of them.
+
+The `zeek_nats_log_writer_connections` gauge reports the number of
+established NATS connections of the Zeek process.

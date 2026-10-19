@@ -1,7 +1,6 @@
 #pragma once
 
 #include <nats/nats.h>
-#include <atomic>
 #include <chrono>
 #include <memory>
 #include <vector>
@@ -11,15 +10,11 @@
 #include "zeek/telemetry/Counter.h"
 #include "zeek/threading/formatters/JSON.h"
 
+#include "SharedClient.h"
+
 using namespace zeek::logging;
 
 namespace zeek::plugin::Zeek_Log_Writer_NATS::detail {
-
-struct NATSWriterStats {
-    std::atomic<zeek_uint_t> dropped_writes = 0;
-    std::atomic<zeek_uint_t> publish_errors = 0;
-    std::atomic<zeek_uint_t> publish_acks = 0;
-};
 
 class NATSWriter : public WriterBackend {
 public:
@@ -27,15 +22,6 @@ public:
     ~NATSWriter() override;
 
     static WriterBackend* Instantiate(WriterFrontend* frontend) { return new NATSWriter(frontend); }
-
-    // Callback for message acknowledgements.
-    void PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate);
-
-    // Callback for message delivery errors.
-    void PublishError(int code, const char* text);
-
-    // Called for every acknowledgement or error received from the server.
-    void PublishResponse() { ++responses; }
 
 protected:
     bool DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) override;
@@ -46,8 +32,9 @@ protected:
     bool DoFinish(double network_time) override;
     bool DoHeartbeat(double network_time, double current_time) override;
 
-    // Try connect and setup the stream.
-    bool Connect();
+    // Returns the shared JetStream context, connecting and setting up
+    // the stream if needed. Returns nullptr if not connected.
+    jsCtx* Connect();
 
     // Counts and logs a write that was dropped.
     void DroppedWrite();
@@ -57,20 +44,15 @@ protected:
     bool SkipStalledPublish();
 
 private:
-    natsConnection* conn = nullptr;
-    natsOptions* opts = nullptr;
-    jsCtx* js = nullptr;
-
-    // Number of publish acknowledgements and errors received from the
-    // server so far, used to detect whether publishing makes progress.
-    std::atomic<uint64_t> responses = 0;
+    std::shared_ptr<SharedClient> client;
+    jsCtx* js = nullptr; // Owned by client.
+    bool stream_added = false;
 
     // Set when a publish timed out waiting for publish_async_max_pending
-    // to free up, along with the response count at that time.
+    // to free up, along with the client's response count at that time.
     bool stalled = false;
     uint64_t stalled_responses = 0;
     std::chrono::steady_clock::time_point last_stalled_publish;
-    jsOptions jsOpts;
     std::string url;
     std::string stream_name_template;
     std::string stream_subject_template;
@@ -88,9 +70,9 @@ private:
     bool create_stream;
     std::string json_timestamps;
 
-    NATSWriterStats writer_stats;
-    zeek_uint_t publish_error_log;
+    std::shared_ptr<NATSWriterStats> writer_stats;
     zeek_uint_t dropped_writes_log;
+    bool share_connection;
     int64_t publish_async_max_pending;
     int64_t publish_async_stall_wait_ms;
     int64_t publish_async_complete_max_wait_ms;

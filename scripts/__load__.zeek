@@ -40,9 +40,14 @@ export {
 	# none if set to 0. By default, log each of them.
 	global dropped_writes_log = 1 &redef;
 
+	# If true, all log streams of a Zeek process publishing to the same url
+	# share a single NATS connection. If false, each log stream uses its own.
+	global share_connection: bool = T &redef;
+
 	# Maximum outstanding asynchronous publishes that can be inflight at one time.
-	# Each log stream has its own NATS connection, so this limit applies to
-	# each of them separately. A value of 0 means unlimited.
+	# With share_connection, this limit applies to all log streams publishing
+	# to the same url combined, otherwise to each of them separately.
+	# A value of 0 means unlimited.
 	global publish_async_max_pending: int = 256 &redef;
 	# Amount of time to wait in a PublishAsync call when
 	# there is MaxPending inflight messages, default is 200 ms.
