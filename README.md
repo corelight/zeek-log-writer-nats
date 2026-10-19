@@ -72,3 +72,17 @@ $ nats subscribe 'sensor.logs.*'
 {"ts":1708620711.443446,"uid":"Cbsjg31hoFHw6fkJch","id.orig_h":"172.17.0.2","id.orig_p":47476,"id.resp_h":"192.0.78.212","id.resp_p":443,"proto":"tcp","service":"ssl","duration":2.2717180252075195,"orig_bytes":758,"resp_bytes":86930,"conn_state":"SF","local_orig":true,"local_resp":false,"missed_bytes":0,"history":"ShADadFf","orig_pkts":48,"orig_ip_bytes":2698,"resp_pkts":48,"resp_ip_bytes":88862}
 
 ```
+
+## Flow Control
+
+`LogNATS::publish_async_max_pending` (default 256) limits the outstanding
+asynchronous publishes of a log path, that is, messages the server hasn't
+acknowledged yet. Once the limit is reached, a write waits up to
+`LogNATS::publish_async_stall_wait` for acknowledgements. If none arrive in
+time, the write is dropped and counted in
+`zeek_nats_log_writer_backend_dropped_writes_total`. Until the server
+responds again, further writes of that log path are dropped right away
+instead of each waiting, apart from one attempt per second. This also
+means that during a server outage writes are dropped once the limit is
+reached, rather than buffered by the NATS client until it reconnects.
+Set the limit to 0 for no limit.

@@ -41,9 +41,13 @@ export {
 	global dropped_writes_log = 1 &redef;
 
 	# Maximum outstanding asynchronous publishes that can be inflight at one time.
-	global publish_async_max_pending: int = 0 &redef;
+	# Each log stream has its own NATS connection, so this limit applies to
+	# each of them separately. A value of 0 means unlimited.
+	global publish_async_max_pending: int = 256 &redef;
 	# Amount of time to wait in a PublishAsync call when
 	# there is MaxPending inflight messages, default is 200 ms.
+	# If the wait times out, the write is dropped and counted
+	# in dropped_writes.
 	global publish_async_stall_wait: interval = 200msec &redef;
 	# Amount of time to wait for async publish at shutdown.
 	global publish_async_complete_max_wait: interval = 1000msec &redef;

@@ -79,6 +79,8 @@ namespace {
 void _jsPubAck(jsCtx* js, natsMsg* msg, jsPubAck* pa, jsPubAckErr* pae, void* closure) {
     auto* writer = static_cast<NATSWriter*>(closure);
 
+    writer->PublishResponse();
+
     if ( pa != nullptr ) {
         writer->PublishAck(pa->Stream, pa->Sequence, pa->Domain, pa->Duplicate);
     }
@@ -285,16 +287,42 @@ bool NATSWriter::Connect() {
     return true;
 }
 
+void NATSWriter::DroppedWrite() {
+    if ( dropped_writes_log > 0 && writer_stats.dropped_writes % dropped_writes_log == 0 )
+        Error(Fmt("Dropped writes [pid=%d dropped_writes=%" PRIu64 "]\n", getpid(), writer_stats.dropped_writes + 1));
+
+    writer_stats.dropped_writes++;
+}
+
+bool NATSWriter::SkipStalledPublish() {
+    if ( ! stalled )
+        return false;
+
+    // Once the server responds again, publish as usual.
+    if ( responses != stalled_responses ) {
+        stalled = false;
+        return false;
+    }
+
+    // Otherwise, drop writes rather than having each of them wait for
+    // publish_async_stall_wait, e.g. when Zeek flushes logs at shutdown
+    // while the server is unavailable. Still attempt a publish now and
+    // then in case the pending messages never get a response.
+    constexpr auto stalled_publish_interval = std::chrono::seconds(1);
+    return std::chrono::steady_clock::now() - last_stalled_publish < stalled_publish_interval;
+}
+
 bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) {
     natsStatus s = NATS_OK;
     jsErrCode jerr;
 
     if ( ! Connect() ) {
-        if ( dropped_writes_log > 0 && writer_stats.dropped_writes % dropped_writes_log == 0 )
-            Error(
-                Fmt("Dropped writes [pid=%d dropped_writes=%" PRIu64 "]\n", getpid(), writer_stats.dropped_writes + 1));
+        DroppedWrite();
+        return true;
+    }
 
-        writer_stats.dropped_writes++;
+    if ( SkipStalledPublish() ) {
+        DroppedWrite();
         return true;
     }
 
@@ -311,8 +339,21 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
         return false;
     }
 
-    if ( s = js_PublishMsgAsync(js, &msg, NULL); s != NATS_OK )
-        PublishError(s, nats_GetLastError(nullptr));
+    if ( s = js_PublishMsgAsync(js, &msg, NULL); s == NATS_OK ) {
+        stalled = false;
+    }
+    else {
+        // NATS_TIMEOUT means publish_async_max_pending messages were
+        // in flight for longer than publish_async_stall_wait.
+        if ( s == NATS_TIMEOUT ) {
+            stalled = true;
+            stalled_responses = responses;
+            last_stalled_publish = std::chrono::steady_clock::now();
+            DroppedWrite();
+        }
+        else
+            PublishError(s, nats_GetLastError(nullptr));
+    }
 
     natsMsg_Destroy(msg);
 
