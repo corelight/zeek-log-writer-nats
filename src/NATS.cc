@@ -1,7 +1,6 @@
 #include "NATS.h"
 
 #include <nats/nats.h>
-#include <cctype>
 #include <cstdio>
 #include <mutex>
 
@@ -108,22 +107,27 @@ std::string template_replace(std::string tmpl, std::vector<Replace>& replacement
     return tmpl;
 }
 
+bool is_path_token_char(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+}
+
 // Escape a log path so it is a single, safe NATS subject token and a
-// valid stream name. Bytes outside [A-Za-z0-9_-] become %XX, including
-// '%' itself, so the original path can be recovered by percent-decoding.
-// Paths such as "conn", "dhcp_fp" or "conn-0" are left as they are.
+// valid stream name. Bytes outside [A-Za-z0-9_-] become %hh (lowercase
+// hex), including '%' itself, so the original path can be recovered by
+// percent-decoding. Paths such as "conn", "dhcp_fp" or "conn-0" are left
+// as they are.
 std::string escape_path_token(const std::string& path) {
-    static constexpr char hex[] = "0123456789ABCDEF";
     std::string out;
     out.reserve(path.size());
     for ( unsigned char c : path ) {
-        if ( std::isalnum(c) || c == '_' || c == '-' ) {
+        if ( is_path_token_char(c) ) {
             out += static_cast<char>(c);
         }
         else {
+            char hex[2];
+            zeek::util::bytetohex(c, hex);
             out += '%';
-            out += hex[c >> 4];
-            out += hex[c & 0x0F];
+            out.append(hex, sizeof(hex));
         }
     }
 

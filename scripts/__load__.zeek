@@ -33,8 +33,8 @@ export {
 	global create_stream: bool = T &redef;
 
 	# Escape the log path before substituting it for {path} in the
-	# templates above. Bytes outside [A-Za-z0-9_-] become %XX (for
-	# example "conn.new" becomes "conn%2Enew"), so the path is always
+	# templates above. Bytes outside [A-Za-z0-9_-] become %hh (for
+	# example "conn.new" becomes "conn%2enew"), so the path is always
 	# one subject token and a valid stream name. Consumers recover the
 	# original path by percent-decoding the token. Set to F to substitute
 	# the raw path, e.g. to map "." in paths onto subject hierarchy.
