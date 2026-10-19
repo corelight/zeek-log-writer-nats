@@ -290,15 +290,12 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     jsErrCode jerr;
 
     if ( ! Connect() ) {
-        if ( dropped_writes_log > 0 ) {
-            if ( writer_stats.dropped_writes % dropped_writes_log == 0 ) {
-                Error(Fmt("Dropped writes [pid=%d dropped_writes=%" PRIu64 "]\n", getpid(),
-                          writer_stats.dropped_writes + 1));
-            }
+        if ( dropped_writes_log > 0 && writer_stats.dropped_writes % dropped_writes_log == 0 )
+            Error(
+                Fmt("Dropped writes [pid=%d dropped_writes=%" PRIu64 "]\n", getpid(), writer_stats.dropped_writes + 1));
 
-            writer_stats.dropped_writes++;
-            return true;
-        }
+        writer_stats.dropped_writes++;
+        return true;
     }
 
     desc.Clear();
