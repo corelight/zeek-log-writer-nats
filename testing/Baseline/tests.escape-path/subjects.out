@@ -6,5 +6,6 @@ test-sensor.logs.conn%2a
 test-sensor.logs.conn%2enew
 test-sensor.logs.conn%2fx
 test-sensor.logs.conn%3e
+test-sensor.logs.conn%c3%a9
 test-sensor.logs.conn-0
 test-sensor.logs.conn_red
