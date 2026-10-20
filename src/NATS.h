@@ -9,6 +9,8 @@
 #include "zeek/telemetry/Counter.h"
 #include "zeek/threading/formatters/JSON.h"
 
+#include "Connection.h"
+
 using namespace zeek::logging;
 
 namespace zeek::plugin::Zeek_Log_Writer_NATS::detail {
@@ -45,11 +47,11 @@ protected:
     bool Connect();
 
 private:
-    natsConnection* conn = nullptr;
-    natsOptions* opts = nullptr;
+    ConnectionFactory* conn_factory = nullptr;
+    std::shared_ptr<Connection> conn = nullptr;
     jsCtx* js = nullptr;
-    jsOptions jsOpts;
     std::string url;
+    std::string conn_sharing_policy;
     std::string stream_name_template;
     std::string stream_subject_template;
     std::string stream_name;

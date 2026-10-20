@@ -37,6 +37,7 @@ include(ZeekPlugin)
 
 zeek_plugin_begin(Zeek Log_Writer_NATS)
 zeek_plugin_cc(src/Plugin.cc)
+zeek_plugin_cc(src/Connection.cc)
 zeek_plugin_cc(src/NATS.cc)
 zeek_plugin_link_library(${NATS_LIBRARIES})
 

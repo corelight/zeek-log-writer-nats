@@ -15,7 +15,26 @@ export {
 		ESCAPE_POLICY_HEX,
 	};
 
+	type ConnectionSharingPolicy: enum {
+		# Every writer uses a dedicated connection to the NATS server.
+		CONNECTION_EXCLUSIVE,
+		# Log writers with the same URL share a single connection
+		# to the NATS server, but use individual JetStream contexts.
+		CONNECTION_SHARED,
+	};
+
 	global url: string = "nats://localhost:4222" &redef;
+
+	# Default connection_sharing_policy.
+	#
+	# By default, every Zeek log writer receives a dedicated connection
+	# to the NATS server configured via url. Setting connection_sharing_policy
+	# to CONNECTION_SHARED instead makes all log writers using the same
+	# url value to share a single connection to the NATS server.
+	#
+	# The policy may be set on a per log writer via the connection_sharing_policy
+	# entry in the writer's config table.
+	global connection_sharing_policy = CONNECTION_EXCLUSIVE &redef;
 
 	# This template is interpolated to produce the subject to publish to.
 	global publish_subject_template: string = "sensor.logs.{path}" &redef;

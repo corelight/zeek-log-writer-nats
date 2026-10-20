@@ -9,6 +9,7 @@
 #include "zeek/logging/WriterFrontend.h"
 #include "zeek/telemetry/Manager.h"
 
+#include "Connection.h"
 #include "Plugin.h"
 
 using namespace zeek::logging;
@@ -41,6 +42,7 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
     // Read script-layer globals on the main thread. DoInit runs in the writer
     // backend thread where global_scope() is not safe to access.
     url = zeek::id::find_val<zeek::StringVal>("LogNATS::url")->ToStdString();
+    conn_sharing_policy = zeek::obj_desc_short(zeek::id::find_val("LogNATS::connection_sharing_policy").get());
     publish_subject_template = zeek::id::find_val<zeek::StringVal>("LogNATS::publish_subject_template")->ToStdString();
     stream_name_template = zeek::id::find_val<zeek::StringVal>("LogNATS::stream_name_template")->ToStdString();
     stream_subject_template = zeek::id::find_val<zeek::StringVal>("LogNATS::stream_subject_template")->ToStdString();
@@ -60,14 +62,11 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
 
 NATSWriter::~NATSWriter() {
     debug("destructor");
-    if ( opts )
-        natsOptions_Destroy(opts);
-
-    if ( conn )
-        natsConnection_Destroy(conn);
 
     if ( js )
         jsCtx_Destroy(js);
+
+    conn = nullptr;
 
     // The counter instances outlive the NATSWriter, but the callbacks
     // point at the embedded writer_stats, so ensure to remove them.
@@ -199,6 +198,9 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
                 return false;
             }
         }
+        else if ( zeek::util::streq(name, "connection_sharing_policy") ) {
+            conn_sharing_policy = value;
+        }
         else {
             Error(Fmt("NATS: Unknown map config %s", name));
             return false;
@@ -249,25 +251,16 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
     }
     formatter = std::make_unique<zeek::threading::formatter::JSON>(this, tf, include_unset_fields);
 
-    if ( s = natsOptions_Create(&opts); s != NATS_OK ) {
-        Error("NATS: Could not create options");
+    if ( conn_sharing_policy == "LogNATS::CONNECTION_EXCLUSIVE" ) {
+        conn_factory = &factory_exclusive;
+    }
+    else if ( conn_sharing_policy == "LogNATS::CONNECTION_SHARED" ) {
+        conn_factory = &factory_shared;
+    }
+    else {
+        Error(Fmt("NATS: Invalid connection sharing policy: %s", conn_sharing_policy.c_str()));
         return false;
     }
-
-    if ( s = natsOptions_SetURL(opts, url.c_str()); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed to SetURL %s: %s", url.c_str(), nats_GetLastError(nullptr)));
-        return false;
-    }
-    if ( s = jsOptions_Init(&jsOpts); s != NATS_OK ) {
-        natsOptions_Destroy(opts);
-        Error(Fmt("NATS: Failed to init JetStream options: %s", nats_GetLastError(nullptr)));
-        return false;
-    }
-
-    jsOpts.PublishAsync.MaxPending = publish_async_max_pending;
-    jsOpts.PublishAsync.AckHandler = _jsPubAck;
-    jsOpts.PublishAsync.AckHandlerClosure = this;
-    jsOpts.PublishAsync.StallWait = publish_async_stall_wait_ms;
 
     return true;
 }
@@ -276,25 +269,29 @@ bool NATSWriter::Connect() {
     if ( conn )
         return true;
 
-    natsStatus s;
-    if ( s = natsConnection_Connect(&conn, opts); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed to connect to %s: %s", url.c_str(), nats_GetLastError(nullptr)));
+    conn = conn_factory->Create(url);
+
+    if ( auto [ok, error] = conn->Connect(); ! ok ) {
+        Error(Fmt("NATS: Failed to connect: %s", error->c_str()));
+        conn = nullptr;
         return false;
     }
 
     debug("Connected!");
 
-    if ( s = natsConnection_JetStream(&js, conn, &jsOpts); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed to initialize JetStream: %s", nats_GetLastError(nullptr)));
-        natsConnection_Destroy(conn);
-        conn = nullptr;
+    auto [ok, error] = conn->JetStream(&js, publish_async_max_pending, publish_async_stall_wait_ms, _jsPubAck, this);
+    if ( ! ok ) {
+        Error(Fmt("NATS: Failed to initialize JetStream: %s", error->c_str()));
+        conn = nullptr; // disconnect
         return false;
     }
 
-    if ( ! create_stream ) {
-        return true;
-    }
+    debug("JetStream context created!");
 
+    if ( ! create_stream )
+        return true;
+
+    natsStatus s;
     jsErrCode jerr;
     jsStreamConfig cfg;
 
@@ -319,7 +316,6 @@ bool NATSWriter::Connect() {
                   stream_subject.c_str(), nats_GetLastError(nullptr)));
         jsCtx_Destroy(js);
         js = nullptr;
-        natsConnection_Destroy(conn);
         conn = nullptr;
         return false;
     }
@@ -376,6 +372,10 @@ bool NATSWriter::DoFlush(double network_time) {
 
 bool NATSWriter::DoFinish(double network_time) {
     debug("DoFinish");
+
+    if ( ! js )
+        return true;
+
     natsStatus s = NATS_OK;
     jsPubOptions completeOpts;
     jsPubOptions_Init(&completeOpts);
@@ -383,6 +383,11 @@ bool NATSWriter::DoFinish(double network_time) {
 
     if ( s = js_PublishAsyncComplete(js, &completeOpts); s != NATS_OK )
         Warning(Fmt("DoFinish: PublishAsyncComplete failed: %s", nats_GetLastError(nullptr)));
+
+    jsCtx_Destroy(js);
+    js = nullptr;
+
+    debug("JetStream context destroyed!");
 
     return true;
 }
