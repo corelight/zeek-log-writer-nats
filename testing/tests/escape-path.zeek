@@ -5,7 +5,7 @@
 # @TEST-EXEC: btest-diff subjects.out
 # @TEST-EXEC: TEST_DIFF_CANONIFIER=sort btest-diff out
 #
-# @TEST-DOC: By default, paths with characters outside [A-Za-z0-9_-] are percent-escaped into a single subject token.
+# @TEST-DOC: With ESCAPE_POLICY_PERCENT, paths with characters outside [A-Za-z0-9_-] are percent-escaped into a single subject token.
 
 @if ( Version::number >= 70100 )
 @load policy/protocols/conn/disable-unknown-ip-proto-support
@@ -14,6 +14,7 @@
 redef LogNATS::publish_subject_template = "test-sensor.logs.{path}";
 redef LogNATS::stream_name_template = "test-sensor-logs";
 redef LogNATS::stream_subject_template = "test-sensor.logs.*";
+redef LogNATS::path_escape_policy = LogNATS::ESCAPE_POLICY_PERCENT;
 
 redef Log::default_writer=Log::WRITER_NATS;
 

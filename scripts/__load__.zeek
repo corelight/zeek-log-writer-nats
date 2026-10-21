@@ -29,10 +29,12 @@ export {
 	global stream_subject_template: string = "sensor.logs.{path}" &redef;
 
 	# How the log path is escaped before it is substituted for {path} in
-	# the templates above. Bytes outside [A-Za-z0-9_-] are escaped, so the
-	# path is always one subject token and a valid stream name, and
-	# paths such as "conn" or "dhcp_fp" are unchanged.
-	global path_escape_policy: PathEscapePolicy = ESCAPE_POLICY_PERCENT &redef;
+	# the templates above. With ESCAPE_POLICY_PERCENT or ESCAPE_POLICY_HEX,
+	# bytes outside [A-Za-z0-9_-] are escaped, so the path is always one
+	# subject token and a valid stream name, and paths such as "conn" or
+	# "dhcp_fp" are unchanged. Defaults to ESCAPE_POLICY_NONE for backwards
+	# compatibility.
+	global path_escape_policy: PathEscapePolicy = ESCAPE_POLICY_NONE &redef;
 
 	global stream_storage: StreamStorage = FILE &redef;
 
