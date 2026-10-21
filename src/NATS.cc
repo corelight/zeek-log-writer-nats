@@ -47,6 +47,7 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
     stream_storage = zeek::id::find_val("LogNATS::stream_storage")->AsEnum();
     include_unset_fields = zeek::id::find_val<zeek::BoolVal>("LogNATS::include_unset_fields")->AsBool();
     create_stream = zeek::id::find_val<zeek::BoolVal>("LogNATS::create_stream")->AsBool();
+    path_escape_policy = zeek::obj_desc_short(zeek::id::find_val("LogNATS::path_escape_policy").get());
     json_timestamps = zeek::obj_desc_short(zeek::id::find_val("LogNATS::json_timestamps").get());
     publish_error_log = zeek::id::find_val("LogNATS::publish_error_log")->AsCount();
     dropped_writes_log = zeek::id::find_val("LogNATS::dropped_writes_log")->AsCount();
@@ -105,6 +106,31 @@ std::string template_replace(std::string tmpl, std::vector<Replace>& replacement
 
     return tmpl;
 }
+
+bool is_path_token_char(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+}
+
+// Escape a log path so it is a single NATS subject token and a valid stream
+// name. Bytes outside [A-Za-z0-9_-] become prefix followed by two lowercase
+// hex digits, so paths such as "conn", "dhcp_fp" or "conn-0" are unchanged.
+std::string escape_path(const std::string& path, const char* prefix) {
+    std::string out;
+    out.reserve(path.size());
+    for ( unsigned char c : path ) {
+        if ( is_path_token_char(c) ) {
+            out += static_cast<char>(c);
+        }
+        else {
+            char hex[2];
+            zeek::util::bytetohex(c, hex);
+            out += prefix;
+            out.append(hex, sizeof(hex));
+        }
+    }
+
+    return out;
+}
 } // namespace
 
 void NATSWriter::PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate) {
@@ -146,6 +172,9 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         else if ( zeek::util::streq(name, "json_timestamps") ) {
             json_timestamps = value;
         }
+        else if ( zeek::util::streq(name, "path_escape_policy") ) {
+            path_escape_policy = value;
+        }
         else if ( zeek::util::streq(name, "include_unset_fields") ) {
             if ( zeek::util::streq(value, "T") ) {
                 include_unset_fields = true;
@@ -176,7 +205,22 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         }
     }
 
-    std::vector<Replace> replacements({{"{path}", info.path}});
+    std::string path;
+    if ( path_escape_policy == "LogNATS::ESCAPE_POLICY_NONE" ) {
+        path = info.path;
+    }
+    else if ( path_escape_policy == "LogNATS::ESCAPE_POLICY_PERCENT" ) {
+        path = escape_path(info.path, "%");
+    }
+    else if ( path_escape_policy == "LogNATS::ESCAPE_POLICY_HEX" ) {
+        path = escape_path(info.path, "\\x");
+    }
+    else {
+        Error(Fmt("NATS: Invalid path_escape_policy %s", path_escape_policy.c_str()));
+        return false;
+    }
+
+    std::vector<Replace> replacements({{"{path}", path}});
 
     stream_name = template_replace(stream_name_template, replacements);
     publish_subject = template_replace(publish_subject_template, replacements);
