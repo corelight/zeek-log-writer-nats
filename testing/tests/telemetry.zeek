@@ -33,11 +33,30 @@ event Pcap::file_done(path: string)
 @endif
 	}
 
+# Wait up to 5 seconds for the log writer threads to process the
+# expected number of publish acknowledgements.
+function wait_for_acks(expected: double)
+	{
+	local i = 0;
+	while ( i < 250 )
+		{
+		local acks = 0.0;
+		for ( _, m in Telemetry::collect_metrics("zeek_nats_log_writer_backend*", "*") )
+			if ( m$opts$name == "zeek_nats_log_writer_backend_publish_acks_total" )
+				acks += m$value;
+
+		if ( acks >= expected )
+			return;
+
+		sleep(20msec);
+		++i;
+		}
+	}
+
 event zeek_done()
 	{
-	# Give the log writer threads a bit of time to process all the acks
-	# and update the metrics.
-	sleep(50msec);
+	# One ack per logged entry.
+	wait_for_acks(82.0);
 
 	local metrics = Telemetry::collect_metrics("zeek_nats_log_writer_backend*", "*");
 	for ( _, m in metrics )

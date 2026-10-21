@@ -1,8 +1,8 @@
 #include "NATS.h"
 
 #include <nats/nats.h>
-#include <cstdio>
-#include <mutex>
+#include <unistd.h>
+#include <cinttypes>
 
 #include "zeek/ID.h"
 #include "zeek/Val.h"
@@ -14,27 +14,29 @@
 using namespace zeek::logging;
 using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
 
-NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
-    // Initialize the NATS metrics with callbacks that use
-    // the embedded WriterStats in in a NATSWriter instance.
+NATSWriter::NATSWriter(WriterFrontend* frontend)
+    : WriterBackend(frontend), writer_stats(std::make_shared<NATSWriterStats>()) {
+    // Initialize the NATS metrics with callbacks that use the
+    // writer's stats, which are updated from the shared client's
+    // ack handler, too.
     std::vector<telemetry::LabelView> labels = {{"filter-name", frontend->GetFilterName()},
                                                 {"path", frontend->Info().path}};
 
     dropped_writes_total = zeek::telemetry_mgr->CounterInstance(
         "zeek", "nats-log-writer-backend-dropped-writes", labels,
         "Dropped log writes of the NATS log writer because of connectivity issues or other problems.", "",
-        [stats = &writer_stats]() { return static_cast<double>(stats->dropped_writes); }),
+        [stats = writer_stats.get()]() { return static_cast<double>(stats->dropped_writes); }),
 
     publish_errors_total =
         zeek::telemetry_mgr
             ->CounterInstance("zeek", "nats-log-writer-backend-publish-errors", labels,
                               "Publish errors reported from the NATS server via the installed AckHandler", "",
-                              [stats = &writer_stats]() { return static_cast<double>(stats->publish_errors); }),
+                              [stats = writer_stats.get()]() { return static_cast<double>(stats->publish_errors); }),
 
     publish_acks_total =
         zeek::telemetry_mgr->CounterInstance("zeek", "nats-log-writer-backend-publish-acks", labels,
                                              "Publish acknowledgements reported via the installed AckHandler", "",
-                                             [stats = &writer_stats]() {
+                                             [stats = writer_stats.get()]() {
                                                  return static_cast<double>(stats->publish_acks);
                                              });
 
@@ -49,8 +51,9 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
     create_stream = zeek::id::find_val<zeek::BoolVal>("LogNATS::create_stream")->AsBool();
     path_escape_policy = zeek::obj_desc_short(zeek::id::find_val("LogNATS::path_escape_policy").get());
     json_timestamps = zeek::obj_desc_short(zeek::id::find_val("LogNATS::json_timestamps").get());
-    publish_error_log = zeek::id::find_val("LogNATS::publish_error_log")->AsCount();
+    writer_stats->publish_error_log = zeek::id::find_val("LogNATS::publish_error_log")->AsCount();
     dropped_writes_log = zeek::id::find_val("LogNATS::dropped_writes_log")->AsCount();
+    share_connection = zeek::id::find_val<zeek::BoolVal>("LogNATS::share_connection")->AsBool();
     publish_async_max_pending = zeek::id::find_val("LogNATS::publish_async_max_pending")->AsInt();
     publish_async_stall_wait_ms =
         static_cast<int64_t>(zeek::id::find_val("LogNATS::publish_async_stall_wait")->AsInterval() * 1000);
@@ -60,14 +63,8 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
 
 NATSWriter::~NATSWriter() {
     debug("destructor");
-    if ( opts )
-        natsOptions_Destroy(opts);
-
-    if ( conn )
-        natsConnection_Destroy(conn);
-
-    if ( js )
-        jsCtx_Destroy(js);
+    if ( client )
+        client->UnregisterStats(publish_subject, writer_stats);
 
     // The counter instances outlive the NATSWriter, but the callbacks
     // point at the embedded writer_stats, so ensure to remove them.
@@ -77,19 +74,6 @@ NATSWriter::~NATSWriter() {
 }
 
 namespace {
-void _jsPubAck(jsCtx* js, natsMsg* msg, jsPubAck* pa, jsPubAckErr* pae, void* closure) {
-    auto* writer = static_cast<NATSWriter*>(closure);
-
-    if ( pa != nullptr ) {
-        writer->PublishAck(pa->Stream, pa->Sequence, pa->Domain, pa->Duplicate);
-    }
-    else if ( pae != nullptr ) {
-        writer->PublishError(pae->ErrCode, pae->ErrText);
-    }
-
-    natsMsg_Destroy(msg);
-}
-
 struct Replace {
     std::string needle;
     std::string replacement;
@@ -133,28 +117,8 @@ std::string escape_path(const std::string& path, const char* prefix) {
 }
 } // namespace
 
-void NATSWriter::PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate) {
-    ++writer_stats.publish_acks;
-}
-
-void NATSWriter::PublishError(int code, const char* text) {
-    // May be called asynchronously and from DoWrite(), so don't use
-    // Error() or Fmt() and instead go through fprintf and use a lock.
-    static std::mutex mx;
-    std::lock_guard lock(mx);
-    if ( publish_error_log > 0 ) {
-        if ( writer_stats.publish_errors % publish_error_log == 0 ) {
-            std::fprintf(stderr, "NATS/%s: PublishError: %s [pid=%d code=%d publish_errors=%" PRIu64 "]\n", Name(),
-                         text, getpid(), code, writer_stats.publish_errors + 1);
-        }
-    }
-
-    writer_stats.publish_errors++;
-}
-
 bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) {
     debug("DoInit %s", info.path);
-    natsStatus s = NATS_OK;
 
     for ( const auto& [name, value] : info.config ) {
         if ( zeek::util::streq(name, "url") ) {
@@ -249,51 +213,35 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
     }
     formatter = std::make_unique<zeek::threading::formatter::JSON>(this, tf, include_unset_fields);
 
-    if ( s = natsOptions_Create(&opts); s != NATS_OK ) {
-        Error("NATS: Could not create options");
-        return false;
-    }
-
-    if ( s = natsOptions_SetURL(opts, url.c_str()); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed to SetURL %s: %s", url.c_str(), nats_GetLastError(nullptr)));
-        return false;
-    }
-    if ( s = jsOptions_Init(&jsOpts); s != NATS_OK ) {
-        natsOptions_Destroy(opts);
-        Error(Fmt("NATS: Failed to init JetStream options: %s", nats_GetLastError(nullptr)));
-        return false;
-    }
-
-    jsOpts.PublishAsync.MaxPending = publish_async_max_pending;
-    jsOpts.PublishAsync.AckHandler = _jsPubAck;
-    jsOpts.PublishAsync.AckHandlerClosure = this;
-    jsOpts.PublishAsync.StallWait = publish_async_stall_wait_ms;
+    writer_stats->name = Name();
+    client = SharedClient::Acquire({.url = url,
+                                    .share_connection = share_connection,
+                                    .publish_async_max_pending = publish_async_max_pending,
+                                    .publish_async_stall_wait_ms = publish_async_stall_wait_ms});
+    client->RegisterStats(publish_subject, writer_stats);
 
     return true;
 }
 
-bool NATSWriter::Connect() {
-    if ( conn )
-        return true;
+jsCtx* NATSWriter::Connect() {
+    if ( js )
+        return js;
 
-    natsStatus s;
-    if ( s = natsConnection_Connect(&conn, opts); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed to connect to %s: %s", url.c_str(), nats_GetLastError(nullptr)));
-        return false;
+    std::string error;
+    js = client->JetStream(&error);
+    if ( ! js ) {
+        if ( ! error.empty() )
+            Error(Fmt("NATS: %s", error.c_str()));
+
+        return nullptr;
     }
 
-    debug("Connected!");
+    if ( ! create_stream || stream_added )
+        return js;
 
-    if ( s = natsConnection_JetStream(&js, conn, &jsOpts); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed to initialize JetStream: %s", nats_GetLastError(nullptr)));
-        natsConnection_Destroy(conn);
-        conn = nullptr;
-        return false;
-    }
-
-    if ( ! create_stream ) {
-        return true;
-    }
+    // Only attempt to add the stream once. If it fails, keep publishing
+    // anyway, the stream may be created or fixed up externally later.
+    stream_added = true;
 
     jsErrCode jerr;
     jsStreamConfig cfg;
@@ -314,19 +262,40 @@ bool NATSWriter::Connect() {
     }
 
     // Add the stream,
-    if ( s = js_AddStream(nullptr, js, &cfg, NULL, &jerr); s != NATS_OK ) {
+    if ( natsStatus s = js_AddStream(nullptr, js, &cfg, NULL, &jerr); s != NATS_OK ) {
         Error(Fmt("NATS: Failed to add stream (stream_name=%s stream_subject=%s): %s", stream_name.c_str(),
                   stream_subject.c_str(), nats_GetLastError(nullptr)));
-        jsCtx_Destroy(js);
-        js = nullptr;
-        natsConnection_Destroy(conn);
-        conn = nullptr;
-        return false;
+        return js;
     }
 
     debug("Stream added!");
 
-    return true;
+    return js;
+}
+
+void NATSWriter::DroppedWrite() {
+    if ( dropped_writes_log > 0 && writer_stats->dropped_writes % dropped_writes_log == 0 )
+        Error(Fmt("Dropped writes [pid=%d dropped_writes=%" PRIu64 "]\n", getpid(), writer_stats->dropped_writes + 1));
+
+    writer_stats->dropped_writes++;
+}
+
+bool NATSWriter::SkipStalledPublish() {
+    if ( ! stalled )
+        return false;
+
+    // Once the server responds again, publish as usual.
+    if ( client->Responses() != stalled_responses ) {
+        stalled = false;
+        return false;
+    }
+
+    // Otherwise, drop writes rather than having each of them wait for
+    // publish_async_stall_wait, e.g. when Zeek flushes logs at shutdown
+    // while the server is unavailable. Still attempt a publish now and
+    // then in case the pending messages never get a response.
+    constexpr auto stalled_publish_interval = std::chrono::seconds(1);
+    return std::chrono::steady_clock::now() - last_stalled_publish < stalled_publish_interval;
 }
 
 bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) {
@@ -334,11 +303,12 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     jsErrCode jerr;
 
     if ( ! Connect() ) {
-        if ( dropped_writes_log > 0 && writer_stats.dropped_writes % dropped_writes_log == 0 )
-            Error(
-                Fmt("Dropped writes [pid=%d dropped_writes=%" PRIu64 "]\n", getpid(), writer_stats.dropped_writes + 1));
+        DroppedWrite();
+        return true;
+    }
 
-        writer_stats.dropped_writes++;
+    if ( SkipStalledPublish() ) {
+        DroppedWrite();
         return true;
     }
 
@@ -355,8 +325,21 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
         return false;
     }
 
-    if ( s = js_PublishMsgAsync(js, &msg, NULL); s != NATS_OK )
-        PublishError(s, nats_GetLastError(nullptr));
+    if ( s = js_PublishMsgAsync(js, &msg, NULL); s == NATS_OK ) {
+        stalled = false;
+    }
+    else {
+        // NATS_TIMEOUT means publish_async_max_pending messages were
+        // in flight for longer than publish_async_stall_wait.
+        if ( s == NATS_TIMEOUT ) {
+            stalled = true;
+            stalled_responses = client->Responses();
+            last_stalled_publish = std::chrono::steady_clock::now();
+            DroppedWrite();
+        }
+        else
+            writer_stats->PublishError(s, nats_GetLastError(nullptr));
+    }
 
     natsMsg_Destroy(msg);
 
@@ -376,6 +359,12 @@ bool NATSWriter::DoFlush(double network_time) {
 
 bool NATSWriter::DoFinish(double network_time) {
     debug("DoFinish");
+    if ( ! js )
+        return true;
+
+    // The JetStream context may be shared with other writers, so this waits
+    // for their outstanding publishes, too. This mostly happens during
+    // shutdown when all writers finish, so that seems acceptable.
     natsStatus s = NATS_OK;
     jsPubOptions completeOpts;
     jsPubOptions_Init(&completeOpts);

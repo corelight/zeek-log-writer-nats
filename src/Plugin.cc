@@ -10,11 +10,13 @@
 #include <zeek/ID.h>
 #include <zeek/Stmt.h>
 #include <zeek/Traverse.h>
+#include <zeek/telemetry/Manager.h>
 #include <zeek/util.h>
 #include <cstdlib>
 #include <memory>
 
 #include "NATS.h"
+#include "SharedClient.h"
 #include "config.h"
 
 namespace zeek::plugin::Zeek_Log_Writer_NATS {
@@ -35,6 +37,15 @@ zeek::plugin::Configuration Plugin::Configure() {
     return config;
 }
 
-void Plugin::InitPostScript() {}
+void Plugin::InitPostScript() {
+    connections_gauge =
+        zeek::telemetry_mgr->GaugeInstance("zeek", "nats-log-writer-connections", {},
+                                           "Established NATS connections of the NATS log writers", "",
+                                           []() { return static_cast<double>(detail::SharedClient::Connections()); });
+}
 
-void Plugin::Done() {}
+void Plugin::Done() {
+    // All writers and their connections are gone at this point. Release
+    // the NATS library's remaining global resources.
+    nats_Close();
+}
