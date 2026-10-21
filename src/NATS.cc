@@ -381,8 +381,22 @@ bool NATSWriter::DoFinish(double network_time) {
     jsPubOptions_Init(&completeOpts);
     completeOpts.MaxWait = publish_async_complete_max_wait_ms;
 
-    if ( s = js_PublishAsyncComplete(js, &completeOpts); s != NATS_OK )
+    if ( s = js_PublishAsyncComplete(js, &completeOpts); s != NATS_OK ) {
         Warning(Fmt("DoFinish: PublishAsyncComplete failed: %s", nats_GetLastError(nullptr)));
+
+        // Try to get the pending messages. Solely for reporting any
+        // information we can figure out or if it'll fail.
+        natsMsgList pending;
+        if ( s = js_PublishAsyncGetPendingList(&pending, js); s == NATS_OK ) {
+            Warning(Fmt("DoFinish: Had %d pending messages", pending.Count));
+            writer_stats.dropped_writes += pending.Count;
+
+            natsMsgList_Destroy(&pending);
+        }
+        else {
+            Warning(Fmt("DoFinish: js_PublishAsyncGetPendingList() failed: %s", nats_GetLastError(nullptr)));
+        }
+    }
 
     jsCtx_Destroy(js);
     js = nullptr;
