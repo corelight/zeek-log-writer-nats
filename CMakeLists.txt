@@ -4,7 +4,6 @@ project(Zeek_Log_Writer_NATS)
 
 find_package(Zeek CONFIG REQUIRED)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${Zeek_DIR})
-set(BRO_PLUGIN_INSTALL_ROOT ${CMAKE_INSTALL_PREFIX}/lib/zeek/plugins)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
