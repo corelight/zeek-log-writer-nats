@@ -40,6 +40,20 @@ struct ConnectionOptions {
 };
 
 
+class Connection;
+
+/**
+ * This is used as the closure for the connection callbacks.
+ *
+ * The CLOSED callback deletes it.
+ */
+struct CallbackState {
+    CallbackState(Connection* c) : conn(c) {}
+
+    std::mutex mtx;
+    Connection* conn = nullptr;
+};
+
 /**
  * A connection to a NATS server with an accessor
  * to allocate a low-level JetStream context.
@@ -100,6 +114,9 @@ public:
 protected:
     ConnectionOptions opts;
     natsConnection* natsConn = nullptr;
+
+    // Deleted in closed_cb(), set in StartConnect()
+    std::shared_ptr<CallbackState> cb_state;
 
 private:
     std::atomic<uint64_t> epoch{0};
