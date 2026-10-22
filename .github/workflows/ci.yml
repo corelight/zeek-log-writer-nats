@@ -15,6 +15,7 @@ jobs:
           - ubuntu-24.04-arm
         image:
           - zeek-8.0
+          - zeek-9.0
           - zeek-dev
     steps:
     - uses: actions/checkout@v4
