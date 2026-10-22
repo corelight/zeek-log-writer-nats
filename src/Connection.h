@@ -1,6 +1,7 @@
 #pragma once
 
 #include <nats/nats.h>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -16,13 +17,26 @@ using Result = std::tuple<bool, std::optional<std::string>>;
 inline Result Ok() { return Result{true, std::nullopt}; }
 inline Result Error(std::string msg) { return {false, std::move(msg)}; }
 
+
 /**
- * Just a struct with the url for now, but if we ever
- * want to pass more connection options around, this
- * will avoid modifying the signature.
+ * Sharing policy for ConnectionFactory::Create()
+ */
+enum class ConnectionSharingPolicy {
+    EXCLUSIVE,
+    SHARED,
+};
+
+/**
+ * Options for a connection.
  */
 struct ConnectionOptions {
     std::string url;
+    int max_reconnect = -1;
+    int64_t connection_timeout_ms = 1000;
+    int64_t ping_interval_ms = 5000;
+    int64_t reconnect_wait_ms = 200;
+    int64_t jitter_ms = 200;
+    int64_t jitter_tls_ms = 200;
 };
 
 
@@ -39,7 +53,22 @@ public:
     Connection(ConnectionOptions opts);
     virtual ~Connection();
 
-    virtual Result Connect() = 0;
+    /**
+     * Starts connecting to the configured NATS servers.
+     */
+    Result StartConnect();
+
+    enum class ConnectionCallbackType {
+        CONNECTED,
+        RECONNECTED,
+        DISCONNECTED,
+        CLOSED,
+    };
+
+    /**
+     * Handle connection callbacks.
+     */
+    virtual void ConnectionCallback(natsConnection* nc, ConnectionCallbackType type);
 
     /**
      * Creates a new JetStream instance for a writer.
@@ -59,60 +88,23 @@ public:
     Result JetStream(jsCtx** js, int64_t publish_async_max_pending, int64_t publish_async_stall_wait_ms,
                      jsPubAckHandler ack_handler, void* ack_handler_closure);
 
-protected:
-    // Low-level helper create the connection to NATS.
-    Result ConnectRaw();
+    /**
+     * The epoch is an increasing counter for when the underlying connection has changed.
+     *
+     * It starts with 0, meaning unconnected and increases with each new reconnection.
+     */
+    uint64_t Epoch() { return epoch; }
 
+    static std::shared_ptr<Connection> Create(ConnectionSharingPolicy policy, ConnectionOptions opts);
+
+protected:
     ConnectionOptions opts;
     natsConnection* natsConn = nullptr;
-};
-
-
-/**
- * Interface to create Connection instances.
- */
-class ConnectionFactory {
-public:
-    virtual ~ConnectionFactory() = default;
-    virtual std::shared_ptr<Connection> Create(std::string url) = 0;
-};
-
-
-class ExclusiveConnection : public Connection {
-public:
-    ExclusiveConnection(ConnectionOptions opts) : Connection(std::move(opts)) {}
-
-    Result Connect() override;
-};
-
-
-class ExclusiveConnectionFactory : public ConnectionFactory {
-public:
-    virtual std::shared_ptr<Connection> Create(std::string url) override;
-};
-
-
-class SharedConnection : public Connection {
-public:
-    SharedConnection(ConnectionOptions opts) : Connection(std::move(opts)) {}
-
-    Result Connect() override;
 
 private:
-    std::mutex connect_mutex;
+    std::atomic<uint64_t> epoch{0};
+    static std::mutex connections_mtx;
+    static std::map<std::string, std::weak_ptr<Connection>> connections;
 };
 
-
-class SharedConnectionFactory : public ConnectionFactory {
-public:
-    virtual std::shared_ptr<Connection> Create(std::string url) override;
-
-private:
-    std::mutex connections_mtx;
-    std::map<std::string, std::weak_ptr<Connection>> connections;
-};
-
-
-extern ExclusiveConnectionFactory factory_exclusive;
-extern SharedConnectionFactory factory_shared;
 } // namespace zeek::plugin::Zeek_Log_Writer_NATS::detail
