@@ -15,7 +15,7 @@
 using namespace zeek::logging;
 using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
 
-NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
+NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*send_heartbeats=*/false) {
     // Initialize the NATS metrics with callbacks that use
     // the embedded WriterStats in in a NATSWriter instance.
     std::vector<telemetry::LabelView> labels = {{"filter-name", frontend->GetFilterName()},
@@ -407,6 +407,7 @@ bool NATSWriter::DoFinish(double network_time) {
 }
 
 bool NATSWriter::DoHeartbeat(double network_time, double current_time) {
+    // NOTE: WriterBackend takes send_heartbeats as false, so this isn't running!
     debug("DoHeartbeat");
     return true;
 }
