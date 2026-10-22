@@ -47,9 +47,9 @@ protected:
     bool Connect();
 
 private:
-    ConnectionFactory* conn_factory = nullptr;
     std::shared_ptr<Connection> conn = nullptr;
     jsCtx* js = nullptr;
+
     std::string url;
     std::string conn_sharing_policy;
     std::string stream_name_template;
@@ -60,7 +60,11 @@ private:
     std::string stream_subject;
     std::vector<const char*> stream_subjects;
     zeek_uint_t stream_storage;
-
+    int64_t connection_timeout_ms;
+    int64_t ping_interval_ms;
+    int64_t reconnect_wait_ms;
+    int64_t jitter_ms;
+    int64_t jitter_tls_ms;
 
     std::unique_ptr<zeek::threading::formatter::JSON> formatter;
     zeek::ODesc desc;

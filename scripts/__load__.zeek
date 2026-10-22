@@ -36,6 +36,21 @@ export {
 	# entry in the writer's config table.
 	global connection_sharing_policy = CONNECTION_EXCLUSIVE &redef;
 
+	# The connection timeout configured via libnats.
+	global connection_timeout = 1000msec &redef;
+
+	# The ping interval configured via libnats.
+	global ping_interval = 5000msec &redef;
+
+	# The reconnect wait configured via libnats.
+	global reconnect_wait = 100msec &redef;
+
+	# The jitter configured via libnats.
+	global jitter = 200msec &redef;
+
+	# The jitter for tls configured via libnats.
+	global jitter_tls = 200msec &redef;
+
 	# This template is interpolated to produce the subject to publish to.
 	global publish_subject_template: string = "sensor.logs.{path}" &redef;
 
@@ -69,19 +84,27 @@ export {
 	# created and configured manually to work with zeek-log-writer-nats.
 	global create_stream: bool = T &redef;
 
-	# Log every n'th asynchronous publish error, or
-	# none if set to 0. By default, log each of them.
-	global publish_error_log = 1 &redef;
+	# Log every n'th asynchronous publish error, or none if set to 0.
+	# By default, log the first and then every thousandths.
+	global publish_error_log = 1000 &redef;
 
-	# Log every n'th dropped write error, or
-	# none if set to 0. By default, log each of them.
-	global dropped_writes_log = 1 &redef;
+	# Log every n'th dropped write error, or none if set to 0.
+	# By default, log the first and then every thousandths.
+	global dropped_writes_log = 1000 &redef;
 
 	# Maximum outstanding asynchronous publishes that can be inflight at one time.
-	global publish_async_max_pending: int = 0 &redef;
-	# Amount of time to wait in a PublishAsync call when
-	# there is MaxPending inflight messages, default is 200 ms.
-	global publish_async_stall_wait: interval = 200msec &redef;
+	global publish_async_max_pending: int = 100000 &redef;
+
+	# How long to wait for the server to send an ACK before considering
+	# a js_PublishAsyncMsg() timed out. Timeouts are tracked in the
+	# zeek_nats_log_writer_backend_publish_timeouts_total metric and
+	# also included in zeek_nats_log_writer_backend_publish_errors_total.
+	global publish_async_max_wait: interval = 10000msec &redef;
+
+	# Amount of time to wait in a PublishMsgAsync call when
+	# there is MaxPending inflight messages, default is 1ms.
+	global publish_async_stall_wait: interval = 1msec &redef;
+
 	# Amount of time to wait for async publish at shutdown.
 	global publish_async_complete_max_wait: interval = 1000msec &redef;
 }

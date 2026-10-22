@@ -58,6 +58,12 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*sen
         static_cast<int64_t>(zeek::id::find_val("LogNATS::publish_async_stall_wait")->AsInterval() * 1000);
     publish_async_complete_max_wait_ms =
         static_cast<int64_t>(zeek::id::find_val("LogNATS::publish_async_complete_max_wait")->AsInterval() * 1000);
+    connection_timeout_ms =
+        static_cast<int64_t>(zeek::id::find_val("LogNATS::connection_timeout")->AsInterval() * 1000);
+    ping_interval_ms = static_cast<int64_t>(zeek::id::find_val("LogNATS::ping_interval")->AsInterval() * 1000);
+    reconnect_wait_ms = static_cast<int64_t>(zeek::id::find_val("LogNATS::reconnect_wait")->AsInterval() * 1000);
+    jitter_ms = static_cast<int64_t>(zeek::id::find_val("LogNATS::jitter")->AsInterval() * 1000);
+    jitter_tls_ms = static_cast<int64_t>(zeek::id::find_val("LogNATS::jitter_tls")->AsInterval() * 1000);
 }
 
 NATSWriter::~NATSWriter() {
@@ -251,38 +257,43 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
     }
     formatter = std::make_unique<zeek::threading::formatter::JSON>(this, tf, include_unset_fields);
 
+    ConnectionSharingPolicy sharing_policy;
     if ( conn_sharing_policy == "LogNATS::CONNECTION_EXCLUSIVE" ) {
-        conn_factory = &factory_exclusive;
+        sharing_policy = ConnectionSharingPolicy::EXCLUSIVE;
     }
     else if ( conn_sharing_policy == "LogNATS::CONNECTION_SHARED" ) {
-        conn_factory = &factory_shared;
+        sharing_policy = ConnectionSharingPolicy::SHARED;
     }
     else {
         eprintf("Invalid connection sharing policy: %s", conn_sharing_policy.c_str());
         return false;
     }
 
+    ConnectionOptions conn_opts{
+        .url = url,
+        .connection_timeout_ms = connection_timeout_ms,
+        .ping_interval_ms = ping_interval_ms,
+        .reconnect_wait_ms = reconnect_wait_ms,
+        .jitter_ms = jitter_ms,
+        .jitter_tls_ms = jitter_tls_ms,
+    };
+
+    // Create will start connection establishment!
+    conn = Connection::Create(sharing_policy, conn_opts);
+
     return true;
 }
 
+// This only ensures that the js instance exists!
 bool NATSWriter::Connect() {
-    if ( conn )
+    if ( js )
         return true;
 
-    conn = conn_factory->Create(url);
-
-    if ( auto [ok, error] = conn->Connect(); ! ok ) {
-        eprintf("Failed to connect: %s\n", error->c_str());
-        conn = nullptr;
-        return false;
-    }
-
-    debug("Connected!");
-
+    debug("Creating a JetStream instance!");
     auto [ok, error] = conn->JetStream(&js, publish_async_max_pending, publish_async_stall_wait_ms, _jsPubAck, this);
     if ( ! ok ) {
+        // XXX: This is noisy!
         eprintf("Failed to initialize JetStream: %s", error->c_str());
-        conn = nullptr; // disconnect
         return false;
     }
 
@@ -316,7 +327,6 @@ bool NATSWriter::Connect() {
                 stream_subject.c_str(), nats_GetLastError(nullptr));
         jsCtx_Destroy(js);
         js = nullptr;
-        conn = nullptr;
         return false;
     }
 
@@ -373,8 +383,10 @@ bool NATSWriter::DoFlush(double network_time) {
 bool NATSWriter::DoFinish(double network_time) {
     debug("DoFinish");
 
-    if ( ! js )
+    if ( ! js ) {
+        conn = nullptr; // make sure the connection is released.
         return true;
+    }
 
     natsStatus s = NATS_OK;
     jsPubOptions completeOpts;
