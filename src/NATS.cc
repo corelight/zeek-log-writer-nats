@@ -143,8 +143,8 @@ void NATSWriter::PublishError(int code, const char* text) {
     std::lock_guard lock(mx);
     if ( publish_error_log > 0 ) {
         if ( writer_stats.publish_errors % publish_error_log == 0 ) {
-            std::fprintf(stderr, "NATS/%s: PublishError: %s [pid=%d code=%d publish_errors=%" PRIu64 "]\n", Name(),
-                         text, getpid(), code, writer_stats.publish_errors + 1);
+            eprintf("%s: PublishError: %s [pid=%d code=%d publish_errors=%" PRIu64 "]\n", Name(), text, getpid(), code,
+                    writer_stats.publish_errors + 1);
         }
     }
 
@@ -182,7 +182,7 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
                 include_unset_fields = false;
             }
             else {
-                Error(Fmt("NATS: Unknown value for include_unset_fields %s:%s", name, value));
+                eprintf("Unknown value for include_unset_fields %s:%s", name, value);
                 return false;
             }
         }
@@ -194,7 +194,7 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
                 create_stream = false;
             }
             else {
-                Error(Fmt("NATS: Unknown value for create_stream %s:%s", name, value));
+                eprintf("Unknown value for create_stream %s:%s", name, value);
                 return false;
             }
         }
@@ -202,7 +202,7 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
             conn_sharing_policy = value;
         }
         else {
-            Error(Fmt("NATS: Unknown map config %s", name));
+            eprintf("Unknown map config %s", name);
             return false;
         }
     }
@@ -218,7 +218,7 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         path = escape_path(info.path, "\\x");
     }
     else {
-        Error(Fmt("NATS: Invalid path_escape_policy %s", path_escape_policy.c_str()));
+        eprintf("Invalid path_escape_policy %s", path_escape_policy.c_str());
         return false;
     }
 
@@ -246,7 +246,7 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         tf = zeek::threading::formatter::JSON::TS_ISO8601;
     }
     else {
-        Error(Fmt("NATS: Invalid json_timestamps format %s", json_timestamps.c_str()));
+        eprintf("Invalid json_timestamps format %s", json_timestamps.c_str());
         return false;
     }
     formatter = std::make_unique<zeek::threading::formatter::JSON>(this, tf, include_unset_fields);
@@ -258,7 +258,7 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         conn_factory = &factory_shared;
     }
     else {
-        Error(Fmt("NATS: Invalid connection sharing policy: %s", conn_sharing_policy.c_str()));
+        eprintf("Invalid connection sharing policy: %s", conn_sharing_policy.c_str());
         return false;
     }
 
@@ -272,7 +272,7 @@ bool NATSWriter::Connect() {
     conn = conn_factory->Create(url);
 
     if ( auto [ok, error] = conn->Connect(); ! ok ) {
-        Error(Fmt("NATS: Failed to connect: %s", error->c_str()));
+        eprintf("Failed to connect: %s\n", error->c_str());
         conn = nullptr;
         return false;
     }
@@ -281,7 +281,7 @@ bool NATSWriter::Connect() {
 
     auto [ok, error] = conn->JetStream(&js, publish_async_max_pending, publish_async_stall_wait_ms, _jsPubAck, this);
     if ( ! ok ) {
-        Error(Fmt("NATS: Failed to initialize JetStream: %s", error->c_str()));
+        eprintf("Failed to initialize JetStream: %s", error->c_str());
         conn = nullptr; // disconnect
         return false;
     }
@@ -312,8 +312,8 @@ bool NATSWriter::Connect() {
 
     // Add the stream,
     if ( s = js_AddStream(nullptr, js, &cfg, NULL, &jerr); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed to add stream (stream_name=%s stream_subject=%s): %s", stream_name.c_str(),
-                  stream_subject.c_str(), nats_GetLastError(nullptr)));
+        eprintf("Failed to add stream (stream_name=%s stream_subject=%s): %s", stream_name.c_str(),
+                stream_subject.c_str(), nats_GetLastError(nullptr));
         jsCtx_Destroy(js);
         js = nullptr;
         conn = nullptr;
@@ -331,8 +331,8 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
 
     if ( ! Connect() ) {
         if ( dropped_writes_log > 0 && writer_stats.dropped_writes % dropped_writes_log == 0 )
-            Error(
-                Fmt("Dropped writes [pid=%d dropped_writes=%" PRIu64 "]\n", getpid(), writer_stats.dropped_writes + 1));
+            eprintf("%s: Dropped writes [pid=%d dropped_writes=%" PRIu64 "]\n", Info().path, getpid(),
+                    writer_stats.dropped_writes + 1);
 
         writer_stats.dropped_writes++;
         return true;
@@ -347,7 +347,7 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
 
     natsMsg* msg;
     if ( s = natsMsg_Create(&msg, publish_subject.c_str(), nullptr /*reply*/, data, data_len); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed Create message: %s", nats_GetLastError(nullptr)));
+        eprintf("Failed Create message: %s", nats_GetLastError(nullptr));
         return false;
     }
 
@@ -382,19 +382,19 @@ bool NATSWriter::DoFinish(double network_time) {
     completeOpts.MaxWait = publish_async_complete_max_wait_ms;
 
     if ( s = js_PublishAsyncComplete(js, &completeOpts); s != NATS_OK ) {
-        Warning(Fmt("DoFinish: PublishAsyncComplete failed: %s", nats_GetLastError(nullptr)));
+        eprintf("DoFinish: PublishAsyncComplete failed: %s", nats_GetLastError(nullptr));
 
         // Try to get the pending messages. Solely for reporting any
         // information we can figure out or if it'll fail.
         natsMsgList pending;
         if ( s = js_PublishAsyncGetPendingList(&pending, js); s == NATS_OK ) {
-            Warning(Fmt("DoFinish: Had %d pending messages", pending.Count));
+            eprintf("DoFinish: Had %d pending messages", pending.Count);
             writer_stats.dropped_writes += pending.Count;
 
             natsMsgList_Destroy(&pending);
         }
         else {
-            Warning(Fmt("DoFinish: js_PublishAsyncGetPendingList() failed: %s", nats_GetLastError(nullptr)));
+            eprintf("DoFinish: js_PublishAsyncGetPendingList() failed: %s", nats_GetLastError(nullptr));
         }
     }
 
