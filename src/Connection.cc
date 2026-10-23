@@ -1,6 +1,7 @@
 #include "Connection.h"
 
 #include <nats/nats.h>
+#include <nats/version.h>
 #include <cstdio>
 
 #include "Plugin.h"
@@ -193,7 +194,7 @@ Result Connection::StartConnect() {
 
     // Log a connected messages - happens in connected_cb otherwise.
     if ( epoch == 1 )
-        eprintf("Connected!");
+        eprintf("Connected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
 
     return Ok();
 }
@@ -217,21 +218,21 @@ void Connection::ConnectionCallback(natsConnection* nc, ConnectionCallbackType t
                 eprintf("Unexpected epoch in CONNECTED callback! %" PRIu64, epoch.load());
             epoch = 1;
 
-            eprintf("Connected!");
+            eprintf("Connected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
             break;
         }
         case ConnectionCallbackType::RECONNECTED: {
             ++epoch;
-            eprintf("Reconnected natsConn=%p epoch=%" PRIu64, natsConn, epoch.load());
+            eprintf("Reconnected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
             break;
         }
         case ConnectionCallbackType::DISCONNECTED: {
-            eprintf("Disconnected natsConn=%p epoch=%" PRIu64, natsConn, epoch.load());
+            eprintf("Disconnected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
             break;
         }
         case ConnectionCallbackType::CLOSED: {
             // This happens at shutdown.
-            eprintf("Connection closed natsconn=%p", natsConn);
+            eprintf("Closed [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
 
             if ( epoch == 0 ) {
                 // XXX: Should only get here if the initial connection wasn't
@@ -239,13 +240,16 @@ void Connection::ConnectionCallback(natsConnection* nc, ConnectionCallbackType t
                 //      returned NATS_NOT_YET_CONNECTED.
                 //
                 // In nats.c, there's was a bug that was fixed with commit
-                // 77843e72 (3.15, Oct 17, 2025) that would cause CLOSED
+                // 77843e72 (3.12, Oct 17, 2025) that would cause CLOSED
                 // callbacks in these scenarios. This branch should not be
                 // reached with version 3.15 or later.
                 //
                 // Destroy this connection (safe?) and initiate another
                 // StartConnect() immediately. The outer closed_cb()
                 // will delete cb_state.
+#if NATS_VERSION_MAJOR > 3 || (NATS_VERSION_MAJOR == 3 && NATS_VERSION_MINOR >= 12)
+                eprintf("Unexpected CLOSED event!");
+#endif
                 cb_state->conn = nullptr;
                 cb_state = nullptr;
 
