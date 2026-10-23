@@ -45,6 +45,11 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*sen
                                                  return static_cast<double>(stats->publish_acks);
                                              });
 
+    publishes_pending =
+        zeek::telemetry_mgr->GaugeInstance("zeek", "nats-log-writer-backend-publishes-pending", labels,
+                                           "In-flight publishes neither confirmed nor failed", "",
+                                           [stats = &writer_stats]() { return static_cast<double>(stats->pending); });
+
     // Read script-layer globals on the main thread. DoInit runs in the writer
     // backend thread where global_scope() is not safe to access.
     url = zeek::id::find_val<zeek::StringVal>("LogNATS::url")->ToStdString();
@@ -64,6 +69,7 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*sen
         static_cast<int64_t>(zeek::id::find_val("LogNATS::publish_async_max_wait")->AsInterval() * 1000);
     publish_async_stall_wait_ms =
         static_cast<int64_t>(zeek::id::find_val("LogNATS::publish_async_stall_wait")->AsInterval() * 1000);
+    publish_async_no_stall = zeek::id::find_val("LogNATS::publish_async_no_stall")->AsBool();
     publish_async_complete_max_wait_ms =
         static_cast<int64_t>(zeek::id::find_val("LogNATS::publish_async_complete_max_wait")->AsInterval() * 1000);
     connection_timeout_ms =
@@ -93,6 +99,8 @@ NATSWriter::~NATSWriter() {
 namespace {
 void _jsPubAck(jsCtx* js, natsMsg* msg, jsPubAck* pa, jsPubAckErr* pae, void* closure) {
     auto* writer = static_cast<NATSWriter*>(closure);
+
+    writer->DecrementPending();
 
     if ( pa != nullptr ) {
         writer->PublishAck(pa->Stream, pa->Sequence, pa->Domain, pa->Duplicate);
@@ -354,7 +362,7 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     natsStatus s = NATS_OK;
     jsErrCode jerr;
 
-    if ( ! Connect() ) {
+    if ( ! Connect() || MayStall() ) {
         if ( dropped_writes_log > 0 && writer_stats.dropped_writes % dropped_writes_log == 0 )
             eprintf("%s: Dropped writes [pid=%d dropped_writes=%" PRIu64 "]\n", Info().path, getpid(),
                     writer_stats.dropped_writes + 1);
@@ -382,6 +390,8 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
 
     if ( s = js_PublishMsgAsync(js, &msg, &opts); s != NATS_OK )
         PublishError(s, /*js_err=*/0, nats_GetLastError(nullptr));
+    else
+        IncrementPending();
 
     natsMsg_Destroy(msg);
 
