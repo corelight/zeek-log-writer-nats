@@ -40,6 +40,10 @@ public:
     // Callback for message delivery errors.
     void PublishError(natsStatus err, int js_err, const char* text);
 
+    // Drop a write. That is something the log writer decided
+    // to actively drop, rather than hit libnats limits.
+    void DropWrite(natsStatus err, const char* text);
+
     void IncrementPending() { ++writer_stats.pending; }
     void DecrementPending() { --writer_stats.pending; }
 
