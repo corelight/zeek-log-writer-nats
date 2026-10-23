@@ -84,6 +84,11 @@ export {
 
 	global stream_storage: StreamStorage = FILE &redef;
 
+	# If T, streams created by the log writer use persist_mode async: the
+	# server acknowledges messages before they are flushed to storage.
+	# Requires nats-server 2.12 and libnats 3.14 or later.
+	global stream_persist_async: bool = F &redef;
+
 	global include_unset_fields: bool = F &redef;
 
 	# Format of the timestamp fields (e.g. ts, _write_ts) in the JSON output.

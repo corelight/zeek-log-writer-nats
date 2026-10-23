@@ -65,6 +65,7 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*sen
     stream_name_template = zeek::id::find_val<zeek::StringVal>("LogNATS::stream_name_template")->ToStdString();
     stream_subject_template = zeek::id::find_val<zeek::StringVal>("LogNATS::stream_subject_template")->ToStdString();
     stream_storage = zeek::id::find_val("LogNATS::stream_storage")->AsEnum();
+    stream_persist_async = zeek::id::find_val<zeek::BoolVal>("LogNATS::stream_persist_async")->AsBool();
     include_unset_fields = zeek::id::find_val<zeek::BoolVal>("LogNATS::include_unset_fields")->AsBool();
     create_stream = zeek::id::find_val<zeek::BoolVal>("LogNATS::create_stream")->AsBool();
     path_escape_policy = zeek::obj_desc_short(zeek::id::find_val("LogNATS::path_escape_policy").get());
@@ -432,6 +433,10 @@ bool NATSWriter::Connect() {
     }
 
 #if NATS_HAS_ALLOW_BATCHED
+    // Acknowledge before the message is flushed to storage.
+    if ( stream_persist_async )
+        cfg.PersistMode = js_PersistAsync;
+
     // Fast-ingest batches are rejected by streams without allow_batched.
     if ( mode == PublishMode::FAST_INGEST )
         cfg.AllowBatched = true;
