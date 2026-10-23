@@ -10,6 +10,10 @@
 #include <string>
 #include <tuple>
 
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+#include <fast_publish.h>
+#endif
+
 namespace zeek::plugin::Zeek_Log_Writer_NATS::detail {
 
 // Go'ish result type
@@ -41,6 +45,7 @@ struct ConnectionOptions {
 
 
 class Connection;
+class FastBatch;
 
 /**
  * This is used as the closure for the connection callbacks.
@@ -102,6 +107,38 @@ public:
     Result JetStream(jsCtx** js, int64_t publish_async_max_pending, int64_t publish_async_stall_wait_ms,
                      jsPubAckHandler ack_handler, void* ack_handler_closure);
 
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+    /**
+     * Creates a new fast-ingest batch publisher (ADR-50) on this connection.
+     *
+     * Caller must destroy it with jsFastPublish_Destroy() before
+     * releasing the connection.
+     *
+     * @param ctx Filled on success.
+     * @param opts Flow control options, read during the call.
+     *
+     * @return Ok or Error, if OK, ctx is filled.
+     */
+    Result FastPublisher(jsFastPublishCtx** ctx, jsFastPublisherOptions* opts);
+
+    /**
+     * Returns the fast-ingest batch shared by all writers of this
+     * connection publishing to the given stream, creating it if
+     * needed, and registers the caller with it. The options of the
+     * first caller are used.
+     *
+     * The caller must call FastBatch::Release() and drop the
+     * reference before releasing the connection.
+     */
+    std::shared_ptr<FastBatch> AcquireFastBatch(const std::string& stream, const jsFastPublisherOptions& opts,
+                                                int64_t idle_timeout_ms);
+#endif
+
+    /**
+     * @return true if the underlying connection is currently connected.
+     */
+    bool IsConnected();
+
     /**
      * The epoch is an increasing counter for when the underlying connection has changed.
      *
@@ -143,6 +180,12 @@ protected:
     std::mutex mtx;
 
 private:
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+    // One shared fast-ingest batch per stream.
+    std::mutex fast_batches_mtx;
+    std::map<std::string, std::weak_ptr<FastBatch>> fast_batches;
+#endif
+
     std::atomic<uint64_t> epoch{0};
     static std::mutex connections_mtx;
     static std::map<std::string, std::weak_ptr<Connection>> connections;

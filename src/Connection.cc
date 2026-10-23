@@ -5,6 +5,7 @@
 #include <nats/version.h>
 #include <cstdio>
 
+#include "FastBatch.h"
 #include "Plugin.h"
 
 using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
@@ -332,6 +333,42 @@ Result Connection::JetStream(jsCtx** js, int64_t publish_async_max_pending, int6
 
     return Ok();
 }
+
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+Result Connection::FastPublisher(jsFastPublishCtx** ctx, jsFastPublisherOptions* opts) {
+    natsStatus s;
+
+    // If we've never connected, do not hand out
+    // a fast publisher instance.
+    if ( epoch == 0 )
+        return Error(NATS_ERR, "NATS connection not yet ready");
+
+    debug("FastPublisher() natsConn=%p\n", natsConn);
+
+    if ( s = jsFastPublishCtx_Create(ctx, natsConn, opts); s != NATS_OK ) {
+        *ctx = nullptr;
+        const char* error = nats_GetLastError(nullptr);
+        return Error(s, std::string("Failed to create fast publisher: ") + (error ? error : natsStatus_GetText(s)));
+    }
+
+    return Ok();
+}
+
+std::shared_ptr<FastBatch> Connection::AcquireFastBatch(const std::string& stream, const jsFastPublisherOptions& opts,
+                                                        int64_t idle_timeout_ms) {
+    std::scoped_lock lock{fast_batches_mtx};
+    auto batch = fast_batches[stream].lock();
+    if ( ! batch ) {
+        batch = std::make_shared<FastBatch>(this, opts, idle_timeout_ms);
+        fast_batches[stream] = batch;
+    }
+
+    batch->Acquire();
+    return batch;
+}
+#endif
+
+bool Connection::IsConnected() { return epoch > 0 && natsConnection_Status(natsConn) == NATS_CONN_STATUS_CONNECTED; }
 
 
 Result Connection::Publish(natsMsg* msg) {

@@ -2,6 +2,8 @@
 
 #include <nats/nats.h>
 #include <memory>
+#include <mutex>
+#include <string>
 #include <vector>
 
 #include "zeek/Desc.h"
@@ -10,6 +12,7 @@
 #include "zeek/threading/formatters/JSON.h"
 
 #include "Connection.h"
+#include "FastBatch.h"
 
 using namespace zeek::logging;
 
@@ -37,8 +40,9 @@ public:
     // Callback for message acknowledgements.
     void PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate);
 
-    // Callback for message delivery errors.
-    void PublishError(natsStatus err, int js_err, const char* text);
+    // Callback for message delivery errors. n is the number of
+    // messages affected by the error.
+    void PublishError(natsStatus err, int js_err, const char* text, zeek_uint_t n = 1);
 
     // Drop a write. That is something the log writer decided
     // to actively drop, rather than hit libnats limits.
@@ -75,9 +79,37 @@ protected:
 
     std::shared_ptr<Connection>& Conn() { return conn; }
 
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+    // Buffer a single message for the connection's shared fast-ingest
+    // batch, publishing the buffer once fast_ingest_writer_batch is reached.
+    void FastIngestWrite(const char* data, int data_len);
+
+    // Publish all buffered messages to the shared batch at once.
+    void FastIngestPublishBuffered();
+
+    // Account for the outcome reported by the shared batch. Messages with
+    // unknown outcome are publish errors, or dropped writes if at_finish
+    // is true.
+    void FastIngestAccount(const FastBatchOutcome& out, bool at_finish);
+#endif
+
 private:
     std::shared_ptr<Connection> conn = nullptr;
     jsCtx* js = nullptr;
+
+    enum class PublishMode {
+        ASYNC,
+        FAST_INGEST,
+    };
+    PublishMode mode = PublishMode::ASYNC;
+    std::string publish_mode;
+
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+    // Shared by all writers of the connection. Outcomes are accounted
+    // to whichever writer observes them, so per-writer acks and errors
+    // are approximate while totals are exact.
+    std::shared_ptr<FastBatch> fast_batch;
+#endif
 
     std::string url;
     std::string conn_sharing_policy;
@@ -110,6 +142,16 @@ private:
     int64_t publish_async_stall_wait_ms;
     bool publish_async_no_stall;
     int64_t publish_async_complete_max_wait_ms;
+    zeek_uint_t fast_ingest_flow;
+    zeek_uint_t fast_ingest_max_outstanding_acks;
+    int64_t fast_ingest_ack_timeout_ms;
+    bool fast_ingest_continue_on_gap;
+    int64_t fast_ingest_idle_timeout_ms;
+    zeek_uint_t fast_ingest_writer_batch;
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+    // Formatted messages not yet published to the shared batch.
+    std::vector<std::string> fast_buffered;
+#endif
 
     zeek::telemetry::CounterPtr dropped_writes_total;
     zeek::telemetry::CounterPtr publish_errors_total;

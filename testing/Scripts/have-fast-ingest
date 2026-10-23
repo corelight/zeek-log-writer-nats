@@ -1,0 +1,10 @@
+#!/bin/bash
+#
+# Succeeds if the plugin was built with fast-ingest (orbit.c) support.
+for dir in ${ZEEK_PLUGIN_PATH//:/ }; do
+    for so in $(find "$dir" -name '*.so' 2>/dev/null); do
+        nm -D --defined-only "$so" 2>/dev/null | grep -q jsFastPublishCtx_Create && exit 0
+    done
+done
+
+exit 1

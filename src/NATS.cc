@@ -1,7 +1,10 @@
 #include "NATS.h"
 
 #include <nats/nats.h>
+#include <nats/version.h>
+#include <cinttypes>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 
 #include "zeek/ID.h"
@@ -15,7 +18,11 @@
 using namespace zeek::logging;
 using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
 
-NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*send_heartbeats=*/false) {
+// jsStreamConfig.AllowBatched was added in libnats 3.14.
+#define NATS_HAS_ALLOW_BATCHED (NATS_VERSION_MAJOR > 3 || (NATS_VERSION_MAJOR == 3 && NATS_VERSION_MINOR >= 14))
+
+// Heartbeats publish the writes buffered for fast ingest.
+NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*send_heartbeats=*/true) {
     // Initialize the NATS metrics with callbacks that use
     // the embedded WriterStats in in a NATSWriter instance.
     std::vector<telemetry::LabelView> labels = {{"filter-name", frontend->GetFilterName()},
@@ -78,10 +85,24 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*sen
     reconnect_wait_ms = static_cast<int64_t>(zeek::id::find_val("LogNATS::reconnect_wait")->AsInterval() * 1000);
     jitter_ms = static_cast<int64_t>(zeek::id::find_val("LogNATS::jitter")->AsInterval() * 1000);
     jitter_tls_ms = static_cast<int64_t>(zeek::id::find_val("LogNATS::jitter_tls")->AsInterval() * 1000);
+    publish_mode = zeek::obj_desc_short(zeek::id::find_val("LogNATS::publish_mode").get());
+    fast_ingest_flow = zeek::id::find_val("LogNATS::fast_ingest_flow")->AsCount();
+    fast_ingest_max_outstanding_acks = zeek::id::find_val("LogNATS::fast_ingest_max_outstanding_acks")->AsCount();
+    fast_ingest_writer_batch = zeek::id::find_val("LogNATS::fast_ingest_writer_batch")->AsCount();
+    fast_ingest_ack_timeout_ms =
+        static_cast<int64_t>(zeek::id::find_val("LogNATS::fast_ingest_ack_timeout")->AsInterval() * 1000);
+    fast_ingest_continue_on_gap = zeek::id::find_val("LogNATS::fast_ingest_continue_on_gap")->AsBool();
+    fast_ingest_idle_timeout_ms =
+        static_cast<int64_t>(zeek::id::find_val("LogNATS::fast_ingest_idle_timeout")->AsInterval() * 1000);
 }
 
 NATSWriter::~NATSWriter() {
     debug("destructor");
+
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+    // The batch references the connection, release it first.
+    fast_batch = nullptr;
+#endif
 
     if ( js )
         jsCtx_Destroy(js);
@@ -160,17 +181,22 @@ void NATSWriter::PublishAck(const char* stream, uint64_t sequence, const char* d
     ++writer_stats.publish_acks;
 }
 
-void NATSWriter::PublishError(natsStatus err, int js_err, const char* text) {
-    auto errors = ++writer_stats.publish_errors;
+void NATSWriter::PublishError(natsStatus err, int js_err, const char* text, zeek_uint_t n) {
+    if ( n == 0 )
+        return;
+
+    auto prev_errors = writer_stats.publish_errors.fetch_add(n);
+    auto errors = prev_errors + n;
 
     // Track timeouts as a separate metric.
     if ( err == NATS_TIMEOUT )
-        ++writer_stats.publish_timeouts;
+        writer_stats.publish_timeouts += n;
 
     if ( publish_error_log == 0 )
         return;
 
-    if ( errors == 1 || errors % publish_error_log == 0 ) {
+    // Log the first error and whenever a multiple of publish_error_log is crossed.
+    if ( prev_errors == 0 || prev_errors / publish_error_log != errors / publish_error_log ) {
         const char* err_text = natsStatus_GetText(err);
         eprintf("%s: PublishError: %s [pid=%d err=%d text=%s js_err=%d publish_errors=%" PRIu64 "]", Info().path,
                 text ? text : "<null>", getpid(), err, err_text ? err_text : "<null>", js_err, errors);
@@ -239,6 +265,9 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         else if ( zeek::util::streq(name, "connection_sharing_policy") ) {
             conn_sharing_policy = value;
         }
+        else if ( zeek::util::streq(name, "publish_mode") ) {
+            publish_mode = value;
+        }
         else {
             eprintf("Unknown map config %s", name);
             return false;
@@ -301,6 +330,51 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         return false;
     }
 
+    if ( publish_mode == "LogNATS::PUBLISH_ASYNC" ) {
+        mode = PublishMode::ASYNC;
+    }
+    else if ( publish_mode == "LogNATS::PUBLISH_FAST_INGEST" ) {
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+        mode = PublishMode::FAST_INGEST;
+
+        if ( fast_ingest_flow < 1 || fast_ingest_flow > UINT16_MAX ) {
+            eprintf("Invalid fast_ingest_flow %" PRIu64 " (1-%u)", fast_ingest_flow, UINT16_MAX);
+            return false;
+        }
+
+        // ADR-50: Clients must not allow more than 3 outstanding acks.
+        if ( fast_ingest_max_outstanding_acks < 1 || fast_ingest_max_outstanding_acks > 3 ) {
+            eprintf("Invalid fast_ingest_max_outstanding_acks %" PRIu64 " (1-3)", fast_ingest_max_outstanding_acks);
+            return false;
+        }
+
+        if ( fast_ingest_ack_timeout_ms <= 0 ) {
+            eprintf("Invalid fast_ingest_ack_timeout %" PRId64 "ms", fast_ingest_ack_timeout_ms);
+            return false;
+        }
+
+        if ( fast_ingest_writer_batch < 1 ) {
+            eprintf("Invalid fast_ingest_writer_batch %" PRIu64 " (>= 1)", fast_ingest_writer_batch);
+            return false;
+        }
+
+#if ! NATS_HAS_ALLOW_BATCHED
+        if ( create_stream ) {
+            eprintf("create_stream with PUBLISH_FAST_INGEST requires libnats 3.14 or later (have %s)",
+                    NATS_VERSION_STRING);
+            return false;
+        }
+#endif
+#else
+        eprintf("PUBLISH_FAST_INGEST is not supported, the plugin was built without orbit.c fast publish support");
+        return false;
+#endif
+    }
+    else {
+        eprintf("Invalid publish_mode: %s", publish_mode.c_str());
+        return false;
+    }
+
     ConnectionOptions conn_opts{
         .url = url,
         .connection_timeout_ms = connection_timeout_ms,
@@ -357,6 +431,12 @@ bool NATSWriter::Connect() {
         cfg.Storage = js_MemoryStorage;
     }
 
+#if NATS_HAS_ALLOW_BATCHED
+    // Fast-ingest batches are rejected by streams without allow_batched.
+    if ( mode == PublishMode::FAST_INGEST )
+        cfg.AllowBatched = true;
+#endif
+
     // Add the stream,
     if ( s = js_AddStream(nullptr, js, &cfg, NULL, &jerr); s != NATS_OK ) {
         eprintf("Failed to add stream (stream_name=%s stream_subject=%s): %s", stream_name.c_str(),
@@ -380,7 +460,7 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
         return true;
     }
 
-    if ( MayStall() ) {
+    if ( mode == PublishMode::ASYNC && MayStall() ) {
         DropWrite(NATS_ERR, "may stall");
         return true;
     }
@@ -393,6 +473,13 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
 
     const char* data = (const char*)desc.Bytes();
     int data_len = desc.Size();
+
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+    if ( mode == PublishMode::FAST_INGEST ) {
+        FastIngestWrite(data, data_len);
+        return true;
+    }
+#endif
 
     natsMsg* msg;
     if ( s = natsMsg_Create(&msg, publish_subject.c_str(), nullptr /*reply*/, data, data_len); s != NATS_OK ) {
@@ -414,6 +501,87 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     return true;
 }
 
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+void NATSWriter::FastIngestAccount(const FastBatchOutcome& out, bool at_finish) {
+    // With several writers on a batch, this writer may be accounting for
+    // messages of others, so its pending gauge may go negative.
+    writer_stats.pending -= static_cast<zeek_int_t>(out.acked + out.failed + out.unknown);
+
+    if ( out.acked > 0 )
+        writer_stats.publish_acks += out.acked;
+
+    if ( out.failed > 0 )
+        PublishError(NATS_ERR, /*js_err=*/0, "fast publish gap or message error", out.failed);
+
+    if ( out.unknown > 0 ) {
+        if ( at_finish ) {
+            eprintf("%s: DoFinish: fast-ingest batch had %" PRIu64 " unacknowledged messages", Info().path,
+                    out.unknown);
+            writer_stats.dropped_writes += out.unknown;
+        }
+        else {
+            PublishError(out.reason, /*js_err=*/0, "fast-ingest batch ended with unacknowledged messages",
+                         out.unknown);
+        }
+    }
+}
+
+void NATSWriter::FastIngestWrite(const char* data, int data_len) {
+    // Publishing while disconnected would stall for fast_ingest_ack_timeout
+    // waiting on flow acks that can't arrive.
+    if ( ! conn->IsConnected() ) {
+        DropWrite(NATS_CONNECTION_DISCONNECTED, "not connected in DoWrite()");
+        return;
+    }
+
+    fast_buffered.emplace_back(data, data_len);
+    if ( fast_buffered.size() >= fast_ingest_writer_batch )
+        FastIngestPublishBuffered();
+}
+
+void NATSWriter::FastIngestPublishBuffered() {
+    if ( fast_buffered.empty() )
+        return;
+
+    if ( ! conn->IsConnected() ) {
+        for ( size_t i = 0; i < fast_buffered.size(); i++ )
+            DropWrite(NATS_CONNECTION_DISCONNECTED, "not connected when publishing buffered writes");
+
+        fast_buffered.clear();
+        return;
+    }
+
+    if ( ! fast_batch ) {
+        jsFastPublisherOptions opts;
+        jsFastPublisherOptions_Init(&opts);
+        opts.Flow = static_cast<uint16_t>(fast_ingest_flow);
+        opts.MaxOutstandingAcks = static_cast<uint16_t>(fast_ingest_max_outstanding_acks);
+        opts.AckTimeout = fast_ingest_ack_timeout_ms;
+        opts.ContinueOnGap = fast_ingest_continue_on_gap;
+        fast_batch = conn->AcquireFastBatch(stream_name, opts, fast_ingest_idle_timeout_ms);
+    }
+
+    FastBatchOutcome out;
+    size_t published = 0;
+    natsStatus s = fast_batch->AddMany(publish_subject.c_str(), fast_buffered, &published, &out);
+    writer_stats.pending += static_cast<zeek_int_t>(published);
+
+    FastIngestAccount(out, /*at_finish=*/false);
+
+    // The failed message and those after it aren't retried.
+    if ( size_t failed = fast_buffered.size() - published; failed > 0 ) {
+        if ( out.not_started ) {
+            for ( size_t i = 0; i < failed; i++ )
+                DropWrite(NATS_ERR, "could not start fast-ingest batch");
+        }
+        else
+            PublishError(s, /*js_err=*/0, out.error.c_str(), failed);
+    }
+
+    fast_buffered.clear();
+}
+#endif
+
 bool NATSWriter::DoRotate(const char* rotated_path, double open, double close, bool terminating) {
     debug("DoRotate");
     FinishedRotation();
@@ -422,6 +590,21 @@ bool NATSWriter::DoRotate(const char* rotated_path, double open, double close, b
 
 bool NATSWriter::DoFlush(double network_time) {
     debug("DoFlush");
+
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+    // Commit the shared batch so all writes so far are confirmed. Otherwise,
+    // the last partial flow window is only acknowledged by later writes.
+    // The next write of any writer starts a new batch.
+    if ( mode == PublishMode::FAST_INGEST )
+        FastIngestPublishBuffered();
+
+    if ( mode == PublishMode::FAST_INGEST && fast_batch ) {
+        FastBatchOutcome out;
+        fast_batch->Commit(fast_ingest_ack_timeout_ms, &out);
+        FastIngestAccount(out, /*at_finish=*/false);
+    }
+#endif
+
     return true;
 }
 
@@ -432,6 +615,28 @@ bool NATSWriter::DoFinish(double network_time) {
         conn = nullptr; // make sure the connection is released.
         return true;
     }
+
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+    if ( mode == PublishMode::FAST_INGEST ) {
+        FastIngestPublishBuffered();
+
+        // The last writer of the connection commits the shared batch.
+        if ( fast_batch && fast_batch->Release() ) {
+            FastBatchOutcome out;
+            fast_batch->Commit(publish_async_complete_max_wait_ms, &out);
+            FastIngestAccount(out, /*at_finish=*/true);
+        }
+
+        fast_batch = nullptr;
+
+        jsCtx_Destroy(js);
+        js = nullptr;
+
+        debug("JetStream context destroyed!");
+
+        return true;
+    }
+#endif
 
     natsStatus s = NATS_OK;
     jsPubOptions completeOpts;
@@ -465,7 +670,13 @@ bool NATSWriter::DoFinish(double network_time) {
 }
 
 bool NATSWriter::DoHeartbeat(double network_time, double current_time) {
-    // NOTE: WriterBackend takes send_heartbeats as false, so this isn't running!
     debug("DoHeartbeat");
+
+#ifdef HAVE_ORBIT_FAST_PUBLISH
+    // Bound how long buffered writes of a quiet writer wait.
+    if ( mode == PublishMode::FAST_INGEST )
+        FastIngestPublishBuffered();
+#endif
+
     return true;
 }

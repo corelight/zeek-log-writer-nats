@@ -23,6 +23,18 @@ export {
 		CONNECTION_SHARED,
 	};
 
+	type PublishMode: enum {
+		# Asynchronous publishing with one acknowledgement per message
+		# (js_PublishMsgAsync). See the publish_async_* options.
+		PUBLISH_ASYNC,
+		# Fast-ingest batch publishing (NATS ADR-50) with server driven
+		# flow control and one acknowledgement every fast_ingest_flow
+		# messages. Requires nats-server 2.14 or later and the plugin
+		# built with orbit.c's jetstream-extra library. See the
+		# fast_ingest_* options.
+		PUBLISH_FAST_INGEST,
+	};
+
 	global url: string = "nats://localhost:4222" &redef;
 
 	# Default connection_sharing_policy.
@@ -114,4 +126,47 @@ export {
 
 	# Amount of time to wait for async publish at shutdown.
 	global publish_async_complete_max_wait: interval = 1000msec &redef;
+
+	# How log writers publish to JetStream.
+	#
+	# The mode may be set on a per log writer via the publish_mode
+	# entry in the writer's config table.
+	global publish_mode: PublishMode = PUBLISH_ASYNC &redef;
+
+	# With PUBLISH_FAST_INGEST, the requested number of messages per
+	# flow acknowledgement. The server starts lower and may adjust
+	# the value at runtime, but never above this one (1-65535).
+	global fast_ingest_flow: count = 100 &redef;
+
+	# With PUBLISH_FAST_INGEST, the number of flow acknowledgements that
+	# may be outstanding before a write blocks waiting for the server (1-3).
+	global fast_ingest_max_outstanding_acks: count = 2 &redef;
+
+	# With PUBLISH_FAST_INGEST, the maximum time a write blocks waiting
+	# for a flow acknowledgement. Hitting it ends the batch, the next
+	# write starts a new one. Unlike PUBLISH_ASYNC with
+	# publish_async_no_stall, fast-ingest writes block rather than drop
+	# when the server applies backpressure.
+	global fast_ingest_ack_timeout: interval = 1000msec &redef;
+
+	# With PUBLISH_FAST_INGEST, continue a batch when the server detects
+	# lost messages. Lost messages are counted as publish errors. If F,
+	# a gap ends the batch and the next write starts a new one.
+	global fast_ingest_continue_on_gap: bool = T &redef;
+
+	# With PUBLISH_FAST_INGEST, a log flush (e.g. Log::flush()) also commits
+	# the current batch.
+	#
+	# With PUBLISH_FAST_INGEST, commit a batch on the next write when no
+	# message has been published for this long. The server abandons
+	# batches after 10 seconds without traffic, so keep this below that.
+	# Set to 0sec to disable.
+	global fast_ingest_idle_timeout: interval = 5sec &redef;
+
+	# With PUBLISH_FAST_INGEST, log writers of a connection publishing to
+	# the same stream share one batch. Each writer buffers this many
+	# writes and publishes them to the batch at once, which keeps writers
+	# from contending on it per write. Buffered writes are also published
+	# on flush and with every writer heartbeat (Threading::heartbeat_interval).
+	global fast_ingest_writer_batch: count = 64 &redef;
 }

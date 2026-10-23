@@ -20,6 +20,23 @@ else ()
     set(NATS_LIBRARIES cnats::nats)
 endif ()
 
+# Optional fast-ingest support (NATS ADR-50) via orbit.c's jetstream-extra
+# library. Requires libnats 3.11 or later.
+find_path(ORBIT_INCLUDE_DIR NAMES fast_publish.h HINTS ${ORBIT_ROOT_DIR}/include)
+find_library(ORBIT_JETSTREAM_EXTRA_LIBRARY NAMES libjetstream_extra_static.a jetstream_extra
+             HINTS ${ORBIT_ROOT_DIR}/lib)
+find_library(ORBIT_UTILS_LIBRARY NAMES liborbit_utils_static.a orbit_utils
+             HINTS ${ORBIT_ROOT_DIR}/lib)
+if (ORBIT_INCLUDE_DIR AND ORBIT_JETSTREAM_EXTRA_LIBRARY AND ORBIT_UTILS_LIBRARY)
+    message(STATUS "Found orbit.c fast publish: ${ORBIT_JETSTREAM_EXTRA_LIBRARY}")
+    include_directories(BEFORE ${ORBIT_INCLUDE_DIR})
+    add_definitions(-DHAVE_ORBIT_FAST_PUBLISH)
+    # orbit libraries depend on libnats, so they go first.
+    set(NATS_LIBRARIES ${ORBIT_JETSTREAM_EXTRA_LIBRARY} ${ORBIT_UTILS_LIBRARY} ${NATS_LIBRARIES})
+else ()
+    message(STATUS "orbit.c fast publish not found, PUBLISH_FAST_INGEST unavailable")
+endif ()
+
 # Establish version numbers in config.h
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" VERSION LIMIT_COUNT 1)
 
@@ -39,6 +56,7 @@ zeek_plugin_cc(src/Plugin.cc)
 zeek_plugin_cc(src/Connection.cc)
 zeek_plugin_cc(src/NATS.cc)
 zeek_plugin_cc(src/NATSCoreWriter.cc)
+zeek_plugin_cc(src/FastBatch.cc)
 zeek_plugin_link_library(${NATS_LIBRARIES})
 
 zeek_plugin_dist_files(README.md CHANGES COPYING VERSION)

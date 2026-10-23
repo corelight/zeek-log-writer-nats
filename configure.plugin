@@ -8,7 +8,8 @@ plugin_usage()
 {
     : # Do nothing
     cat <<EOF
-    --with-libnats-root=DIR          Path to foo
+    --with-libnats-root=DIR          Path to libnats
+    --with-orbit-root=DIR            Path to orbit.c (fast-ingest support)
 EOF
 }
 
@@ -17,6 +18,11 @@ plugin_option()
     case "$1" in
         --with-libnats-root=*)
             append_cache_entry LIBNATS_ROOT_DIR PATH $optarg
+            return 0
+            ;;
+
+        --with-orbit-root=*)
+            append_cache_entry ORBIT_ROOT_DIR PATH $optarg
             return 0
             ;;
 
