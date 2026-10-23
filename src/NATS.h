@@ -19,6 +19,7 @@ struct NATSWriterStats {
     std::atomic<zeek_uint_t> dropped_writes = 0;
     std::atomic<zeek_uint_t> publish_errors = 0;
     std::atomic<zeek_uint_t> publish_acks = 0;
+    std::atomic<zeek_uint_t> publish_timeouts = 0;
 };
 
 class NATSWriter : public WriterBackend {
@@ -77,11 +78,13 @@ private:
     zeek_uint_t publish_error_log;
     zeek_uint_t dropped_writes_log;
     int64_t publish_async_max_pending;
+    int64_t publish_async_max_wait_ms;
     int64_t publish_async_stall_wait_ms;
     int64_t publish_async_complete_max_wait_ms;
 
     zeek::telemetry::CounterPtr dropped_writes_total;
     zeek::telemetry::CounterPtr publish_errors_total;
+    zeek::telemetry::CounterPtr publish_timeouts_total;
     zeek::telemetry::CounterPtr publish_acks_total;
 };
 } // namespace zeek::plugin::Zeek_Log_Writer_NATS::detail
