@@ -20,6 +20,11 @@ struct NATSWriterStats {
     std::atomic<zeek_uint_t> publish_errors = 0;
     std::atomic<zeek_uint_t> publish_acks = 0;
     std::atomic<zeek_uint_t> publish_timeouts = 0;
+    // Pending publishes that have neither been acked,
+    // timed out, or otherwise failed. May go negative,
+    // but that's probably a bug. This value is exposed
+    // per writer as metric.
+    std::atomic<zeek_int_t> pending = 0;
 };
 
 class NATSWriter : public WriterBackend {
@@ -34,6 +39,17 @@ public:
 
     // Callback for message delivery errors.
     void PublishError(natsStatus err, int js_err, const char* text);
+
+    void IncrementPending() { ++writer_stats.pending; }
+    void DecrementPending() { --writer_stats.pending; }
+
+    // Return true if this write should be dropped to prevent stalling.
+    bool MayStall() const {
+        if ( publish_async_no_stall && publish_async_max_pending > 0 )
+            return writer_stats.pending >= publish_async_max_pending;
+
+        return false;
+    };
 
 protected:
     bool DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) override;
@@ -80,11 +96,13 @@ private:
     int64_t publish_async_max_pending;
     int64_t publish_async_max_wait_ms;
     int64_t publish_async_stall_wait_ms;
+    bool publish_async_no_stall;
     int64_t publish_async_complete_max_wait_ms;
 
     zeek::telemetry::CounterPtr dropped_writes_total;
     zeek::telemetry::CounterPtr publish_errors_total;
     zeek::telemetry::CounterPtr publish_timeouts_total;
     zeek::telemetry::CounterPtr publish_acks_total;
+    zeek::telemetry::GaugePtr publishes_pending;
 };
 } // namespace zeek::plugin::Zeek_Log_Writer_NATS::detail

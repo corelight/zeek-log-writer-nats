@@ -105,6 +105,13 @@ export {
 	# there is MaxPending inflight messages, default is 1ms.
 	global publish_async_stall_wait: interval = 1msec &redef;
 
+	# If T, will discard js_PublishMsgAsync if the log writers
+	# own pending tracking indicates publish_async_max_pending
+	# has been exceeded. libnats does not provide a non-stalling
+	# mode, but generally we never want DoWrite() to block, so
+	# this defaults to T.
+	global publish_async_no_stall = T &redef;
+
 	# Amount of time to wait for async publish at shutdown.
 	global publish_async_complete_max_wait: interval = 1000msec &redef;
 }
