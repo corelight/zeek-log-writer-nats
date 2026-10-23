@@ -101,6 +101,7 @@ private:
     std::string stream_subject;
     std::vector<const char*> stream_subjects;
     zeek_uint_t stream_storage;
+    bool stream_persist_async;
     int64_t connection_timeout_ms;
     int64_t ping_interval_ms;
     int64_t reconnect_wait_ms;
