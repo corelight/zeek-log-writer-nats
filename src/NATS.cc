@@ -98,7 +98,7 @@ void _jsPubAck(jsCtx* js, natsMsg* msg, jsPubAck* pa, jsPubAckErr* pae, void* cl
         writer->PublishAck(pa->Stream, pa->Sequence, pa->Domain, pa->Duplicate);
     }
     else if ( pae != nullptr ) {
-        writer->PublishError(pae->ErrCode, pae->ErrText);
+        writer->PublishError(pae->Err, pae->ErrCode, pae->ErrText);
     }
 
     natsMsg_Destroy(msg);
@@ -151,14 +151,16 @@ void NATSWriter::PublishAck(const char* stream, uint64_t sequence, const char* d
     ++writer_stats.publish_acks;
 }
 
-void NATSWriter::PublishError(int code, const char* text) {
+void NATSWriter::PublishError(natsStatus err, int js_err, const char* text) {
     // May be called asynchronously and from DoWrite(), so don't use
     // Error() or Fmt() and instead go through fprintf and use a lock.
     static std::mutex mx;
     std::lock_guard lock(mx);
     if ( publish_error_log > 0 ) {
         if ( writer_stats.publish_errors % publish_error_log == 0 ) {
-            eprintf("%s: PublishError: %s [pid=%d code=%d publish_errors=%" PRIu64 "]\n", Name(), text, getpid(), code,
+            const char* err_text = natsStatus_GetText(err);
+            eprintf("%s: PublishError: %s [pid=%d err=%d err_text=%s js_err=%d publish_errors=%" PRIu64 "]\n", Name(),
+                    text ? text : "<null>", getpid(), err, err_text ? err_text : "<null>", js_err,
                     writer_stats.publish_errors + 1);
         }
     }
@@ -166,7 +168,7 @@ void NATSWriter::PublishError(int code, const char* text) {
     writer_stats.publish_errors++;
 
     // Track timeouts as a separate metric.
-    if ( code == NATS_TIMEOUT )
+    if ( err == NATS_TIMEOUT )
         writer_stats.publish_timeouts++;
 }
 
@@ -379,7 +381,7 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     opts.MaxWait = publish_async_max_wait_ms;
 
     if ( s = js_PublishMsgAsync(js, &msg, &opts); s != NATS_OK )
-        PublishError(s, nats_GetLastError(nullptr));
+        PublishError(s, /*js_err=*/0, nats_GetLastError(nullptr));
 
     natsMsg_Destroy(msg);
 

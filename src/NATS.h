@@ -33,7 +33,7 @@ public:
     void PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate);
 
     // Callback for message delivery errors.
-    void PublishError(int code, const char* text);
+    void PublishError(natsStatus err, int js_err, const char* text);
 
 protected:
     bool DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) override;
