@@ -161,24 +161,32 @@ void NATSWriter::PublishAck(const char* stream, uint64_t sequence, const char* d
 }
 
 void NATSWriter::PublishError(natsStatus err, int js_err, const char* text) {
-    // May be called asynchronously and from DoWrite(), so don't use
-    // Error() or Fmt() and instead go through fprintf and use a lock.
-    static std::mutex mx;
-    std::lock_guard lock(mx);
-    if ( publish_error_log > 0 ) {
-        if ( writer_stats.publish_errors % publish_error_log == 0 ) {
-            const char* err_text = natsStatus_GetText(err);
-            eprintf("%s: PublishError: %s [pid=%d err=%d err_text=%s js_err=%d publish_errors=%" PRIu64 "]\n", Name(),
-                    text ? text : "<null>", getpid(), err, err_text ? err_text : "<null>", js_err,
-                    writer_stats.publish_errors + 1);
-        }
-    }
-
-    writer_stats.publish_errors++;
+    auto errors = ++writer_stats.publish_errors;
 
     // Track timeouts as a separate metric.
     if ( err == NATS_TIMEOUT )
-        writer_stats.publish_timeouts++;
+        ++writer_stats.publish_timeouts;
+
+    if ( publish_error_log == 0 )
+        return;
+
+    if ( errors == 1 || errors % publish_error_log == 0 ) {
+        const char* err_text = natsStatus_GetText(err);
+        eprintf("%s: PublishError: %s [pid=%d err=%d text=%s js_err=%d publish_errors=%" PRIu64 "]", Info().path,
+                text ? text : "<null>", getpid(), err, err_text ? err_text : "<null>", js_err, errors);
+    }
+}
+
+
+void NATSWriter::DropWrite(natsStatus err, const char* text) {
+    auto dropped_writes = ++writer_stats.dropped_writes;
+
+    if ( dropped_writes_log == 0 )
+        return;
+
+    if ( dropped_writes == 1 || dropped_writes % dropped_writes_log == 0 )
+        eprintf("%s: Dropped writes [pid=%d err=%d text=%s dropped_writes=%" PRIu64 "]", Info().path, getpid(), err,
+                text, dropped_writes);
 }
 
 bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) {
@@ -315,11 +323,8 @@ bool NATSWriter::Connect() {
 
     debug("Creating a JetStream instance!");
     auto [ok, error] = conn->JetStream(&js, publish_async_max_pending, publish_async_stall_wait_ms, _jsPubAck, this);
-    if ( ! ok ) {
-        // XXX: This is noisy!
-        eprintf("Failed to initialize JetStream: %s", error->c_str());
+    if ( ! ok )
         return false;
-    }
 
     debug("JetStream context created!");
 
@@ -363,26 +368,29 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     natsStatus s = NATS_OK;
     jsErrCode jerr;
 
-    if ( ! Connect() || MayStall() ) {
-        if ( dropped_writes_log > 0 && writer_stats.dropped_writes % dropped_writes_log == 0 )
-            eprintf("%s: Dropped writes [pid=%d dropped_writes=%" PRIu64 "]\n", Info().path, getpid(),
-                    writer_stats.dropped_writes + 1);
+    if ( ! Connect() ) {
+        DropWrite(NATS_NOT_YET_CONNECTED, "not yet connected in DoWrite()");
+        return true;
+    }
 
-        writer_stats.dropped_writes++;
+    if ( MayStall() ) {
+        DropWrite(NATS_ERR, "may stall");
         return true;
     }
 
     desc.Clear();
-    if ( ! formatter->Describe(&desc, num_fields, fields, vals) )
-        return false;
+    if ( ! formatter->Describe(&desc, num_fields, fields, vals) ) {
+        DropWrite(NATS_ERR, "formatter describe failed");
+        return true;
+    }
 
     const char* data = (const char*)desc.Bytes();
     int data_len = desc.Size();
 
     natsMsg* msg;
     if ( s = natsMsg_Create(&msg, publish_subject.c_str(), nullptr /*reply*/, data, data_len); s != NATS_OK ) {
-        eprintf("Failed Create message: %s", nats_GetLastError(nullptr));
-        return false;
+        DropWrite(s, "failed to create message");
+        return true;
     }
 
     jsPubOptions opts;
@@ -424,19 +432,20 @@ bool NATSWriter::DoFinish(double network_time) {
     completeOpts.MaxWait = publish_async_complete_max_wait_ms;
 
     if ( s = js_PublishAsyncComplete(js, &completeOpts); s != NATS_OK ) {
-        eprintf("DoFinish: PublishAsyncComplete failed: %s", nats_GetLastError(nullptr));
+        eprintf("%s: DoFinish: PublishAsyncComplete failed: %s", Info().path, nats_GetLastError(nullptr));
 
         // Try to get the pending messages. Solely for reporting any
         // information we can figure out or if it'll fail.
         natsMsgList pending;
         if ( s = js_PublishAsyncGetPendingList(&pending, js); s == NATS_OK ) {
-            eprintf("DoFinish: Had %d pending messages", pending.Count);
+            eprintf("%s: DoFinish: Had %d pending messages", Info().path, pending.Count);
             writer_stats.dropped_writes += pending.Count;
 
             natsMsgList_Destroy(&pending);
         }
         else {
-            eprintf("DoFinish: js_PublishAsyncGetPendingList() failed: %s", nats_GetLastError(nullptr));
+            eprintf("%s: DoFinish: js_PublishAsyncGetPendingList() failed: %s", Info().path,
+                    nats_GetLastError(nullptr));
         }
     }
 
