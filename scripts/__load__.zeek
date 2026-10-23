@@ -95,6 +95,12 @@ export {
 	# Maximum outstanding asynchronous publishes that can be inflight at one time.
 	global publish_async_max_pending: int = 100000 &redef;
 
+	# How long to wait for the server to send an ACK before considering
+	# a js_PublishAsyncMsg() timed out. Timeouts are tracked in the
+	# zeek_nats_log_writer_backend_publish_timeouts_total metric and
+	# also included in zeek_nats_log_writer_backend_publish_errors_total.
+	global publish_async_max_wait: interval = 10000msec &redef;
+
 	# Amount of time to wait in a PublishAsync call when
 	# there is MaxPending inflight messages, default is 200 ms.
 	global publish_async_stall_wait: interval = 1msec &redef;

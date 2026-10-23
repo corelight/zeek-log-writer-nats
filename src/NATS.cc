@@ -32,6 +32,12 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*sen
                               "Publish errors reported from the NATS server via the installed AckHandler", "",
                               [stats = &writer_stats]() { return static_cast<double>(stats->publish_errors); }),
 
+    publish_timeouts_total =
+        zeek::telemetry_mgr
+            ->CounterInstance("zeek", "nats-log-writer-backend-publish-timeouts", labels,
+                              "Publish timeouts when publish_async_max_wait or publish_async_stall_wait_ms were hit",
+                              "", [stats = &writer_stats]() { return static_cast<double>(stats->publish_timeouts); }),
+
     publish_acks_total =
         zeek::telemetry_mgr->CounterInstance("zeek", "nats-log-writer-backend-publish-acks", labels,
                                              "Publish acknowledgements reported via the installed AckHandler", "",
@@ -54,6 +60,8 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*sen
     publish_error_log = zeek::id::find_val("LogNATS::publish_error_log")->AsCount();
     dropped_writes_log = zeek::id::find_val("LogNATS::dropped_writes_log")->AsCount();
     publish_async_max_pending = zeek::id::find_val("LogNATS::publish_async_max_pending")->AsInt();
+    publish_async_max_wait_ms =
+        static_cast<int64_t>(zeek::id::find_val("LogNATS::publish_async_max_wait")->AsInterval() * 1000);
     publish_async_stall_wait_ms =
         static_cast<int64_t>(zeek::id::find_val("LogNATS::publish_async_stall_wait")->AsInterval() * 1000);
     publish_async_complete_max_wait_ms =
@@ -77,8 +85,9 @@ NATSWriter::~NATSWriter() {
     // The counter instances outlive the NATSWriter, but the callbacks
     // point at the embedded writer_stats, so ensure to remove them.
     dropped_writes_total->RemoveCallback();
-    publish_acks_total->RemoveCallback();
     publish_errors_total->RemoveCallback();
+    publish_timeouts_total->RemoveCallback();
+    publish_acks_total->RemoveCallback();
 }
 
 namespace {
@@ -155,6 +164,10 @@ void NATSWriter::PublishError(int code, const char* text) {
     }
 
     writer_stats.publish_errors++;
+
+    // Track timeouts as a separate metric.
+    if ( code == NATS_TIMEOUT )
+        writer_stats.publish_timeouts++;
 }
 
 bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) {
@@ -361,7 +374,11 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
         return false;
     }
 
-    if ( s = js_PublishMsgAsync(js, &msg, NULL); s != NATS_OK )
+    jsPubOptions opts;
+    jsPubOptions_Init(&opts);
+    opts.MaxWait = publish_async_max_wait_ms;
+
+    if ( s = js_PublishMsgAsync(js, &msg, &opts); s != NATS_OK )
         PublishError(s, nats_GetLastError(nullptr));
 
     natsMsg_Destroy(msg);
