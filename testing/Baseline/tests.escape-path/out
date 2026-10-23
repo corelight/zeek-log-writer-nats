@@ -19,3 +19,13 @@ zeek_nats_log_writer_backend_publish_errors_total, [conn>, conn>], 0.0
 zeek_nats_log_writer_backend_publish_errors_total, [conn\xc3\xa9, conn\xc3\xa9], 0.0
 zeek_nats_log_writer_backend_publish_errors_total, [conn_red, conn_red], 0.0
 zeek_nats_log_writer_backend_publish_errors_total, [default, conn], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [conn new, conn new], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [conn%, conn%], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [conn*, conn*], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [conn-0, conn-0], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [conn.new, conn.new], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [conn/x, conn/x], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [conn>, conn>], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [conn\xc3\xa9, conn\xc3\xa9], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [conn_red, conn_red], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [default, conn], 0.0
