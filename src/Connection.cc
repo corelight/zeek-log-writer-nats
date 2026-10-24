@@ -137,57 +137,57 @@ Result Connection::StartConnect() {
     });
 
     if ( s = natsOptions_SetURL(natsOpts, opts.url.c_str()); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to SetURL: " + error);
     }
 
     if ( s = natsOptions_SetTimeout(natsOpts, opts.connection_timeout_ms); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to SetTimeout: " + error);
     }
 
     if ( s = natsOptions_SetAllowReconnect(natsOpts, true); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to SetAllowReconnect: " + error);
     }
 
     if ( s = natsOptions_SetReconnectWait(natsOpts, opts.reconnect_wait_ms); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to SetReconnectWait: " + error);
     }
 
     if ( s = natsOptions_SetMaxReconnect(natsOpts, opts.max_reconnect); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to SetMaxReconnect: " + error);
     }
 
     if ( s = natsOptions_SetReconnectedCB(natsOpts, reconnected_cb, tmp_holder); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to SetReconnectedCB: " + error);
     }
 
     if ( s = natsOptions_SetClosedCB(natsOpts, closed_cb, tmp_holder); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to SetClosedCB: " + error);
     }
 
     if ( s = natsOptions_SetDisconnectedCB(natsOpts, disconnected_cb, tmp_holder); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to SetDisconnectedCB: " + error);
     }
 
     if ( s = natsOptions_SetRetryOnFailedConnect(natsOpts, /*retry=*/true, connected_cb, tmp_holder); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to SetRetryOnFailedConnect: " + error);
     }
 
     if ( s = natsOptions_SetReconnectJitter(natsOpts, opts.jitter_ms, opts.jitter_tls_ms); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to SetReconnectJitter: " + error);
     }
 
     if ( s = natsOptions_SetPingInterval(natsOpts, opts.ping_interval_ms); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to SetRetryOnFailedConnect: " + error);
     }
 
@@ -199,7 +199,7 @@ Result Connection::StartConnect() {
         std::scoped_lock lock{cb_state->mtx};
 
         if ( s = natsConnection_Connect(&natsConn, natsOpts); (s != NATS_OK && s != NATS_NOT_YET_CONNECTED) ) {
-            std::string error = nats_GetLastError(nullptr);
+            std::string error = LastError(s);
             return Error(s, error + "[url=" + opts.url + "]");
         }
 
@@ -313,7 +313,7 @@ Result Connection::JetStream(jsCtx** js, int64_t publish_async_max_pending, int6
 
     if ( s = jsOptions_Init(&jsOpts); s != NATS_OK ) {
         *js = nullptr;
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to init JetStream options: " + error);
     }
 
@@ -326,7 +326,7 @@ Result Connection::JetStream(jsCtx** js, int64_t publish_async_max_pending, int6
 
     if ( s = natsConnection_JetStream(js, natsConn, &jsOpts); s != NATS_OK ) {
         *js = nullptr;
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, "Failed to initialize JetStream: " + error);
     }
 
@@ -344,7 +344,7 @@ Result Connection::Publish(natsMsg* msg) {
 #endif
 
     if ( s = natsConnection_PublishMsg(natsConn, msg); s != NATS_OK ) {
-        std::string error = nats_GetLastError(nullptr);
+        std::string error = LastError(s);
         return Error(s, std::move(error));
     }
 
@@ -466,8 +466,7 @@ Result FastPublisher::DoAddMsg(natsMsg* msg, const char* subject, const void* da
         // when it is full, or in DoHeartbeat() or DoFinish().
         if ( s = jsFastPublishCtx_Create(&fp_ctx, nc, &fp_opts); s != NATS_OK ) {
             eprintf("jsPublishCtx_Create failed");
-            std::string error = nats_GetLastError(nullptr);
-            return Error(s, error);
+            return Error(s, LastError(s));
         }
     }
 
@@ -502,8 +501,7 @@ Result FastPublisher::DoAddMsg(natsMsg* msg, const char* subject, const void* da
                                      opts.commit_timeout_ms);
 
         if ( s != NATS_OK ) {
-            std::string error = nats_GetLastError(nullptr);
-            eprintf("CommitMsg failed -- really bad: %s\n", error.c_str());
+            eprintf("CommitMsg failed -- really bad: %s\n", LastError(s));
             // PublishError(s, 0, "jsFastPublish_CommitMsg() failed");
         }
         else {
