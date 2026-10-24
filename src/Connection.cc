@@ -211,6 +211,11 @@ Result Connection::StartConnect() {
         // the connect_cb will set epoch appropriately.
         epoch = s == NATS_NOT_YET_CONNECTED ? 0 : 1;
 
+        // Callbacks that ran before natsConn was set were ignored, so take the
+        // current status. We hold cb_state->mtx, which the callbacks also take,
+        // so later ones apply on top of this.
+        connected = epoch > 0 && natsConnection_Status(natsConn) == NATS_CONN_STATUS_CONNECTED;
+
         // Log a connected messages - happens in connected_cb otherwise.
         if ( epoch == 1 )
             eprintf("Connected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
@@ -237,20 +242,25 @@ void Connection::ConnectionCallback(natsConnection* nc, ConnectionCallbackType t
             if ( epoch != 0 )
                 eprintf("Unexpected epoch in CONNECTED callback! %" PRIu64, epoch.load());
             epoch = 1;
+            connected = true;
 
             eprintf("Connected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
             break;
         }
         case ConnectionCallbackType::RECONNECTED: {
             ++epoch;
+            connected = true;
             eprintf("Reconnected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
             break;
         }
         case ConnectionCallbackType::DISCONNECTED: {
+            connected = false;
             eprintf("Disconnected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
             break;
         }
         case ConnectionCallbackType::CLOSED: {
+            connected = false;
+
             // This happens at shutdown.
             eprintf("Closed [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
 
@@ -366,8 +376,6 @@ std::shared_ptr<FastBatch> Connection::AcquireFastBatch(const std::shared_ptr<Co
     return batch;
 }
 #endif
-
-bool Connection::IsConnected() { return epoch > 0 && natsConnection_Status(natsConn) == NATS_CONN_STATUS_CONNECTED; }
 
 
 Result Connection::Publish(natsMsg* msg) {

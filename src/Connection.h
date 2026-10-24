@@ -153,8 +153,13 @@ public:
 
     /**
      * @return true if the underlying connection is currently connected.
+     *
+     * Lock-free, it's called for every write: the state is tracked from
+     * the connection callbacks rather than queried with
+     * natsConnection_Status(), which takes the connection's mutex that
+     * publishing holds while flushing.
      */
-    bool IsConnected();
+    bool IsConnected() { return connected.load(std::memory_order_acquire); }
 
     /**
      * The epoch is an increasing counter for when the underlying connection has changed.
@@ -204,6 +209,8 @@ private:
 #endif
 
     std::atomic<uint64_t> epoch{0};
+    // Set and cleared by the connection callbacks, see IsConnected().
+    std::atomic<bool> connected{false};
     static std::mutex connections_mtx;
     static std::map<std::string, std::weak_ptr<Connection>> connections;
 };
