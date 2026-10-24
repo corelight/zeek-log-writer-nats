@@ -63,6 +63,7 @@ struct ConnectionOptions {
 
 class Connection;
 class FastBatch;
+struct FastBatchConfig;
 
 /**
  * This is used as the closure for the connection callbacks.
@@ -139,16 +140,15 @@ public:
     Result FastPublisher(jsFastPublishCtx** ctx, jsFastPublisherOptions* opts);
 
     /**
-     * Returns the fast-ingest batch shared by all writers of this
-     * connection publishing to the given stream, creating it if
-     * needed, and registers the caller with it. The options of the
-     * first caller are used.
+     * Returns the fast-ingest batch shared by all writers of conn
+     * publishing to the stream of cfg, creating it if needed, and
+     * registers the caller with it. The configuration of the first
+     * caller is used.
      *
-     * The caller must call FastBatch::Release() and drop the
-     * reference before releasing the connection.
+     * The caller must call FastBatch::Release() when done.
      */
-    std::shared_ptr<FastBatch> AcquireFastBatch(const std::string& stream, const jsFastPublisherOptions& opts,
-                                                int64_t idle_timeout_ms);
+    static std::shared_ptr<FastBatch> AcquireFastBatch(const std::shared_ptr<Connection>& conn,
+                                                       const FastBatchConfig& cfg);
 #endif
 
     /**

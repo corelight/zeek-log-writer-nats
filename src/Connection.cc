@@ -353,13 +353,13 @@ Result Connection::FastPublisher(jsFastPublishCtx** ctx, jsFastPublisherOptions*
     return Ok();
 }
 
-std::shared_ptr<FastBatch> Connection::AcquireFastBatch(const std::string& stream, const jsFastPublisherOptions& opts,
-                                                        int64_t idle_timeout_ms) {
-    std::scoped_lock lock{fast_batches_mtx};
-    auto batch = fast_batches[stream].lock();
+std::shared_ptr<FastBatch> Connection::AcquireFastBatch(const std::shared_ptr<Connection>& conn,
+                                                        const FastBatchConfig& cfg) {
+    std::scoped_lock lock{conn->fast_batches_mtx};
+    auto batch = conn->fast_batches[cfg.stream].lock();
     if ( ! batch ) {
-        batch = std::make_shared<FastBatch>(this, opts, idle_timeout_ms);
-        fast_batches[stream] = batch;
+        batch = std::make_shared<FastBatch>(conn, cfg);
+        conn->fast_batches[cfg.stream] = batch;
     }
 
     batch->Acquire();

@@ -2,6 +2,9 @@
 
 #ifdef HAVE_ORBIT_FAST_PUBLISH
 
+#include <pthread.h>
+#include <algorithm>
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -15,17 +18,38 @@ namespace {
 void _fastBatchErr(natsStatus status, const char* description, void* closure) {
     static_cast<FastBatch*>(closure)->OnError(status, description);
 }
+
+// Rough per-message overhead of a queued std::string on top of its data.
+constexpr uint64_t queued_msg_overhead = sizeof(std::string);
+
+// Number of sequences of [first, last] within the given ranges.
+uint64_t overlap(const std::vector<std::pair<uint64_t, uint64_t>>& ranges, uint64_t first, uint64_t last) {
+    uint64_t n = 0;
+    for ( const auto& [from, to] : ranges ) {
+        uint64_t lo = std::max(from, first);
+        uint64_t hi = std::min(to, last);
+        if ( lo <= hi )
+            n += hi - lo + 1;
+    }
+
+    return n;
+}
 } // namespace
 
-FastBatch::FastBatch(Connection* conn, const jsFastPublisherOptions& arg_opts, int64_t idle_timeout_ms)
-    : conn(conn), opts(arg_opts), idle_timeout_ms(idle_timeout_ms) {
-    opts.ErrHandler = _fastBatchErr;
-    opts.ErrHandlerClosure = this;
-}
+FastBatch::FastBatch(std::shared_ptr<Connection> conn, FastBatchConfig cfg)
+    : conn(std::move(conn)), cfg(std::move(cfg)) {}
 
 FastBatch::~FastBatch() {
-    if ( ctx )
-        jsFastPublish_Destroy(ctx);
+    {
+        std::scoped_lock lock{mtx};
+        stopping = true;
+        stop_timeout_ms = cfg.ack_timeout_ms;
+    }
+
+    work_cv.notify_one();
+
+    if ( thread.joinable() )
+        thread.join();
 }
 
 void FastBatch::Acquire() {
@@ -33,159 +57,470 @@ void FastBatch::Acquire() {
     ++writers;
 }
 
-bool FastBatch::Release() {
+void FastBatch::Release(int64_t timeout_ms) {
+    // Joined without holding mtx. Taking it out of thread under mtx keeps
+    // Enqueue() and Flush() of a writer acquiring the batch meanwhile from
+    // racing on it, and Enqueue() doesn't start a new thread while stopping.
+    std::thread publisher;
+    {
+        std::scoped_lock lock{mtx};
+        if ( --writers > 0 )
+            return;
+
+        stopping = true;
+        stop_timeout_ms = timeout_ms;
+        publisher = std::move(thread);
+    }
+
+    work_cv.notify_one();
+    space_cv.notify_all();
+
+    if ( publisher.joinable() )
+        publisher.join();
+
+    // A writer may still acquire the batch again, e.g. for a new log path.
     std::scoped_lock lock{mtx};
-    return --writers == 0;
+    stopping = false;
+}
+
+size_t FastBatch::Enqueue(const std::shared_ptr<FastBatchWriter>& w, std::vector<std::string>&& msgs) {
+    size_t n = msgs.size();
+    if ( n == 0 )
+        return 0;
+
+    uint64_t bytes = 0;
+    for ( const auto& m : msgs )
+        bytes += m.size() + queued_msg_overhead;
+
+    std::unique_lock lock{mtx};
+
+    // An empty queue always takes a chunk, even one larger than queue_bytes.
+    auto has_space = [&]() { return stopping || queued_bytes == 0 || queued_bytes + bytes <= cfg.queue_bytes; };
+
+    if ( ! has_space() ) {
+        if ( ! cfg.no_stall )
+            space_cv.wait(lock, has_space);
+        else if ( ! space_cv.wait_for(lock, std::chrono::milliseconds(cfg.stall_wait_ms), has_space) )
+            return n;
+    }
+
+    if ( stopping )
+        return n;
+
+    if ( ! thread.joinable() )
+        thread = std::thread([this]() { Run(); });
+
+    queued_bytes += bytes;
+    queue.push_back(Chunk{w, std::move(msgs), bytes, 0});
+    lock.unlock();
+
+    work_cv.notify_one();
+    return 0;
+}
+
+bool FastBatch::Flush(int64_t timeout_ms) {
+    std::unique_lock lock{mtx};
+
+    // Nothing was queued since the publisher thread last stopped, or it's
+    // stopping, which commits anyway.
+    if ( ! thread.joinable() )
+        return true;
+
+    uint64_t id = ++flush_requested;
+    queue.push_back(Chunk{nullptr, {}, 0, id});
+    work_cv.notify_one();
+
+    return done_cv.wait_for(lock, std::chrono::milliseconds(timeout_ms), [&]() { return flush_completed >= id; });
+}
+
+uint64_t FastBatch::Finish(const std::shared_ptr<FastBatchWriter>& w, int64_t timeout_ms) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+
+    // Commit, so the last partial flow window is confirmed.
+    Flush(timeout_ms);
+
+    std::unique_lock lock{mtx};
+    done_cv.wait_until(lock, deadline, [&]() { return w->stats->pending <= 0; });
+
+    w->finished = true;
+    int64_t pending = w->stats->pending.exchange(0);
+    if ( pending <= 0 )
+        return 0;
+
+    w->stats->dropped_writes += pending;
+    return static_cast<uint64_t>(pending);
 }
 
 void FastBatch::OnError(natsStatus err, const char* text) {
-    // Gaps report the number of messages lost.
+    // Messages [expected_last, current) were lost. A backward gap
+    // (current <= expected_last) ends the batch, the commit ack then
+    // confirms what was persisted.
     uint64_t expected_last = 0;
     uint64_t current = 0;
     if ( std::sscanf(text, "fast publish gap: expected_last=%" SCNu64 " current=%" SCNu64, &expected_last, &current) ==
          2 ) {
-        async_failed += current > expected_last ? current - expected_last : 1;
+        if ( current > expected_last ) {
+            std::scoped_lock lock{errors_mtx};
+            failed.emplace_back(expected_last, current - 1);
+        }
+
         return;
     }
 
     // A single message failed, the batch continues.
-    if ( std::strncmp(text, "fast publish error at sequence", 30) == 0 ) {
-        ++async_failed;
+    uint64_t seq = 0;
+    if ( std::sscanf(text, "fast publish error at sequence %" SCNu64, &seq) == 1 ) {
+        std::scoped_lock lock{errors_mtx};
+        failed.emplace_back(seq, seq);
         return;
     }
 
     // Everything else ends the batch.
     debug("FastBatch error: %s", text);
-    std::scoped_lock lock{error_mtx};
+    std::scoped_lock lock{errors_mtx};
     batch_error = text;
 }
 
-bool FastBatch::StartLocked() {
-    if ( auto [ok, error] = conn->FastPublisher(&ctx, &opts); ! ok ) {
-        debug("FastBatch start failed: %s", error ? error->c_str() : "<null>");
-        return false;
+void FastBatch::Run() {
+#ifdef __linux__
+    pthread_setname_np(pthread_self(), "zk.nats-fast");
+#endif
+
+    std::unique_lock lock{mtx};
+
+    while ( ! stopping ) {
+        if ( queue.empty() ) {
+            auto has_work = [&]() { return stopping || ! queue.empty(); };
+
+            if ( ! ctx || cfg.idle_timeout_ms <= 0 ) {
+                work_cv.wait(lock, has_work);
+                continue;
+            }
+
+            // Commit idle batches, the server abandons them after 10
+            // seconds without traffic.
+            int64_t wait_ms = std::max<int64_t>(1, last_publish_ms + cfg.idle_timeout_ms - nats_Now());
+            if ( ! work_cv.wait_for(lock, std::chrono::milliseconds(wait_ms), has_work) &&
+                 nats_Now() - last_publish_ms >= cfg.idle_timeout_ms ) {
+                lock.unlock();
+                EndBatchIfReconnected();
+                if ( ctx )
+                    EndBatch(/*commit=*/true, cfg.ack_timeout_ms, NATS_OK);
+                lock.lock();
+            }
+
+            continue;
+        }
+
+        Chunk chunk = std::move(queue.front());
+        queue.pop_front();
+        queued_bytes -= chunk.bytes;
+        space_cv.notify_all();
+        lock.unlock();
+
+        if ( chunk.writer )
+            Publish(chunk);
+        else {
+            EndBatchIfReconnected();
+            if ( ctx )
+                EndBatch(/*commit=*/true, cfg.ack_timeout_ms, NATS_OK);
+        }
+
+        lock.lock();
+
+        if ( ! chunk.writer ) {
+            flush_completed = std::max(flush_completed, chunk.flush_id);
+            done_cv.notify_all();
+        }
+    }
+
+    // Stopping: drop what's still queued and commit.
+    uint64_t dropped = 0;
+    for ( auto& chunk : queue ) {
+        if ( ! chunk.writer ) {
+            flush_completed = std::max(flush_completed, chunk.flush_id);
+            continue;
+        }
+
+        if ( chunk.writer->finished )
+            continue;
+
+        chunk.writer->stats->dropped_writes += chunk.msgs.size();
+        chunk.writer->stats->pending -= static_cast<int64_t>(chunk.msgs.size());
+        dropped += chunk.msgs.size();
+    }
+
+    queue.clear();
+    queued_bytes = 0;
+    int64_t timeout_ms = stop_timeout_ms > 0 ? stop_timeout_ms : cfg.ack_timeout_ms;
+    done_cv.notify_all();
+    lock.unlock();
+
+    if ( dropped > 0 )
+        eprintf("%s: fast-ingest stopped with %" PRIu64 " queued writes, dropped", cfg.stream.c_str(), dropped);
+
+    EndBatchIfReconnected();
+    if ( ctx )
+        EndBatch(/*commit=*/true, timeout_ms, NATS_OK);
+}
+
+void FastBatch::Publish(Chunk& chunk) {
+    const auto& w = chunk.writer;
+    size_t n = chunk.msgs.size();
+
+    {
+        // Already accounted as dropped by Finish().
+        std::scoped_lock lock{mtx};
+        if ( w->finished )
+            return;
+    }
+
+    auto drop = [&](size_t from, const char* why) {
+        size_t count = n - from;
+        std::scoped_lock lock{mtx};
+        if ( ! w->finished ) {
+            w->stats->dropped_writes += count;
+            w->stats->pending -= static_cast<int64_t>(count);
+            eprintf("%s: Dropped %zu writes: %s", w->path.c_str(), count, why);
+        }
+
+        done_cv.notify_all();
+    };
+
+    uint64_t pre_wire_errors = 0;
+
+    for ( size_t i = 0; i < n; i++ ) {
+        // Publishing while disconnected would stall until ack_timeout.
+        if ( ! conn->IsConnected() ) {
+            if ( ctx )
+                EndBatch(/*commit=*/false, 0, NATS_CONNECTION_DISCONNECTED);
+
+            drop(i, "not connected");
+            break;
+        }
+
+        // The server may have ended the batch asynchronously.
+        if ( ctx && jsFastPublish_IsClosed(ctx) )
+            EndBatch(/*commit=*/false, 0, NATS_ERR);
+
+        EndBatchIfReconnected();
+
+        if ( ! ctx && ! StartBatch() ) {
+            drop(i, "could not start fast-ingest batch");
+            break;
+        }
+
+        // Blocks for the first flow ack of a new batch, and while the
+        // window of outstanding acks is full, at most ack_timeout_ms.
+        const auto& m = chunk.msgs[i];
+        jsFastPubAck ack{};
+        natsStatus s = jsFastPublish_Add(&ack, ctx, w->subject.c_str(), m.data(), static_cast<int>(m.size()), nullptr);
+        if ( s == NATS_OK ) {
+            sent = ack.BatchSequence;
+            acked = std::max(acked, ack.AckSequence);
+            last_publish_ms = nats_Now();
+            Track(w, sent);
+            continue;
+        }
+
+        if ( jsFastPublish_IsClosed(ctx) ) {
+            // orbit.c closes the batch once a message reached the wire,
+            // e.g. after an ack timeout, so its outcome is unknown. With
+            // orbit.c's patch, ack also reports flow acks that arrived
+            // while waiting. Commit what the server has, then continue
+            // with a new batch.
+            acked = std::max(acked, ack.AckSequence);
+            Track(w, ++sent);
+            EndBatch(/*commit=*/s == NATS_TIMEOUT, cfg.ack_timeout_ms, s);
+            continue;
+        }
+
+        // Failed before reaching the wire, the batch is still open.
+        debug("jsFastPublish_Add failed: %s", LastError(s));
+        ++pre_wire_errors;
     }
 
     {
-        std::scoped_lock lock{error_mtx};
-        batch_error.clear();
+        std::scoped_lock lock{mtx};
+        if ( pre_wire_errors > 0 && ! w->finished ) {
+            w->stats->pending -= static_cast<int64_t>(pre_wire_errors);
+            AccountErrors(*w, pre_wire_errors, 0, "publish failed");
+        }
+
+        ResolveLocked(acked);
+        done_cv.notify_all();
+    }
+}
+
+bool FastBatch::StartBatch() {
+    jsFastPublisherOptions opts;
+    jsFastPublisherOptions_Init(&opts);
+    opts.Flow = cfg.flow;
+    opts.MaxOutstandingAcks = cfg.max_outstanding_acks;
+    opts.AckTimeout = cfg.ack_timeout_ms;
+    opts.ContinueOnGap = cfg.continue_on_gap;
+    opts.ErrHandler = _fastBatchErr;
+    opts.ErrHandlerClosure = this;
+
+    if ( auto [ok, status, error] = conn->FastPublisher(&ctx, &opts); ! ok ) {
+        debug("FastBatch start failed: %s", error ? error->c_str() : "<null>");
+        ctx = nullptr;
+        return false;
     }
 
     sent = 0;
     acked = 0;
     last_publish_ms = nats_Now();
+    batch_epoch = conn->Epoch();
 
     debug("FastBatch started");
     return true;
 }
 
-void FastBatch::EndLocked(bool commit, int64_t timeout_ms, FastBatchOutcome* out) {
-    uint64_t confirmed = acked;
-    natsStatus reason = NATS_ERR;
+void FastBatch::EndBatchIfReconnected() {
+    if ( ! ctx || conn->Epoch() == batch_epoch )
+        return;
 
-    if ( commit && sent > 0 && ! jsFastPublish_IsClosed(ctx) ) {
+    // A server that kept the batch confirms it with the commit. Otherwise,
+    // e.g. after a restart, messages since the last flow ack may or may not
+    // have been persisted before.
+    debug("FastBatch: connection reconnected, ending the batch");
+    EndBatch(/*commit=*/true, cfg.ack_timeout_ms, NATS_CONNECTION_DISCONNECTED, /*outcome_unknown=*/true);
+}
+
+void FastBatch::EndBatch(bool commit, int64_t timeout_ms, natsStatus reason, bool outcome_unknown) {
+    uint64_t confirmed = acked;
+
+    if ( commit && sent > 0 ) {
+        // With orbit.c's patch, this also commits batches closed by an ack
+        // timeout, confirming what the server persisted meanwhile.
         jsPubAck* pa = nullptr;
-        if ( natsStatus s = jsFastPublish_Close(&pa, ctx, timeout_ms); s == NATS_OK ) {
+        if ( natsStatus s = jsFastPublish_Close(&pa, ctx, timeout_ms > 0 ? timeout_ms : cfg.ack_timeout_ms);
+             s == NATS_OK ) {
             // Count is the batch sequence of the last message, the commit
             // ack confirms the whole batch.
-            if ( pa->Count > confirmed )
-                confirmed = pa->Count;
-
-            jsPubAck_Destroy(pa);
+            if ( pa ) {
+                confirmed = std::max(confirmed, pa->Count);
+                jsPubAck_Destroy(pa);
+            }
         }
         else {
             debug("jsFastPublish_Close failed: %s", natsStatus_GetText(s));
-            reason = s;
+            if ( reason == NATS_OK || s == NATS_TIMEOUT )
+                reason = s;
         }
     }
 
-    if ( confirmed > acked )
-        out->acked += confirmed - acked;
+    if ( reason == NATS_OK )
+        reason = NATS_ERR;
 
-    if ( sent > confirmed ) {
-        out->unknown += sent - confirmed;
-        out->reason = reason;
+    std::string error;
+    {
+        std::scoped_lock elock{errors_mtx};
+        error = batch_error;
     }
 
+    const char* why = error.empty() ? natsStatus_GetText(reason) : error.c_str();
+
+    {
+        std::scoped_lock lock{mtx};
+        ResolveLocked(confirmed);
+
+        // Anything left was neither confirmed nor reported failed.
+        std::vector<std::pair<uint64_t, uint64_t>> lost;
+        {
+            std::scoped_lock elock{errors_mtx};
+            lost = failed;
+        }
+
+        for ( const auto& r : inflight ) {
+            if ( r.writer->finished )
+                continue;
+
+            uint64_t n = r.last - r.first + 1;
+            uint64_t definite = overlap(lost, r.first, r.last);
+            uint64_t unknown = reason == NATS_TIMEOUT || outcome_unknown ? n - definite : 0;
+            r.writer->stats->pending -= static_cast<int64_t>(n);
+            AccountErrors(*r.writer, n - unknown, unknown, why);
+        }
+
+        inflight.clear();
+        done_cv.notify_all();
+    }
+
+    // Waits until the ack handler can't run anymore, so clearing the
+    // failures afterwards doesn't race with late reports.
     jsFastPublish_Destroy(ctx);
     ctx = nullptr;
     sent = 0;
     acked = 0;
 
+    {
+        std::scoped_lock elock{errors_mtx};
+        failed.clear();
+        batch_error.clear();
+    }
+
     debug("FastBatch ended");
 }
 
-natsStatus FastBatch::AddMany(const char* subject, const std::vector<std::string>& msgs, size_t* published,
-                              FastBatchOutcome* out) {
-    std::scoped_lock lock{mtx};
-
-    out->failed += async_failed.exchange(0);
-
-    *published = 0;
-    for ( const auto& m : msgs ) {
-        if ( natsStatus s = AddLocked(subject, m.data(), static_cast<int>(m.size()), out); s != NATS_OK )
-            return s;
-
-        ++*published;
+void FastBatch::Track(const std::shared_ptr<FastBatchWriter>& w, uint64_t seq) {
+    if ( ! inflight.empty() && inflight.back().writer == w && inflight.back().last + 1 == seq ) {
+        inflight.back().last = seq;
+        return;
     }
 
-    return NATS_OK;
+    inflight.push_back(InFlight{seq, seq, w});
 }
 
-natsStatus FastBatch::AddLocked(const char* subject, const char* data, int data_len, FastBatchOutcome* out) {
-    // The server may have ended the batch asynchronously.
-    if ( ctx && jsFastPublish_IsClosed(ctx) )
-        EndLocked(/*commit=*/false, 0, out);
+void FastBatch::ResolveLocked(uint64_t seq) {
+    if ( inflight.empty() || inflight.front().first > seq )
+        return;
 
-    // The server abandons batches without traffic for 10 seconds,
-    // commit idle batches before that happens.
-    int64_t now = nats_Now();
-    if ( ctx && idle_timeout_ms > 0 && now - last_publish_ms >= idle_timeout_ms )
-        EndLocked(/*commit=*/true, opts.AckTimeout, out);
-
-    if ( ! ctx && ! StartLocked() ) {
-        out->not_started = true;
-        return NATS_ERR;
+    std::vector<std::pair<uint64_t, uint64_t>> lost;
+    {
+        std::scoped_lock elock{errors_mtx};
+        lost = failed;
     }
 
-    // Blocks for the first flow ack on a new batch, and when the window
-    // of outstanding acks is full, at most AckTimeout. Other writers wait
-    // on mtx meanwhile, which is the backpressure.
-    jsFastPubAck ack;
-    natsStatus s = jsFastPublish_Add(&ack, ctx, subject, data, data_len, nullptr);
-    if ( s == NATS_OK ) {
-        last_publish_ms = now;
-        sent = ack.BatchSequence;
-        if ( ack.AckSequence > acked ) {
-            out->acked += ack.AckSequence - acked;
-            acked = ack.AckSequence;
+    while ( ! inflight.empty() && inflight.front().first <= seq ) {
+        auto& r = inflight.front();
+        uint64_t last = std::min(r.last, seq);
+
+        if ( ! r.writer->finished ) {
+            uint64_t n = last - r.first + 1;
+            uint64_t definite = overlap(lost, r.first, last);
+            r.writer->stats->publish_acks += n - definite;
+            r.writer->stats->pending -= static_cast<int64_t>(n);
+            AccountErrors(*r.writer, definite, 0, "messages lost by the server");
         }
 
-        return NATS_OK;
+        if ( last == r.last )
+            inflight.pop_front();
+        else
+            r.first = last + 1;
     }
-
-    // orbit.c doesn't always set a libnats error, e.g. on stall timeouts.
-    {
-        std::scoped_lock elock{error_mtx};
-        out->error = batch_error;
-    }
-
-    if ( out->error.empty() )
-        out->error = LastError(s);
-
-    if ( jsFastPublish_IsClosed(ctx) )
-        EndLocked(/*commit=*/false, 0, out);
-
-    return s;
 }
 
-void FastBatch::Commit(int64_t timeout_ms, FastBatchOutcome* out) {
-    std::scoped_lock lock{mtx};
+void FastBatch::AccountErrors(FastBatchWriter& w, uint64_t errors, uint64_t timeouts, const char* reason) {
+    // Log the first one and whenever a multiple of publish_error_log is
+    // crossed, like NATSWriter::PublishError().
+    auto account = [&](std::atomic<uint64_t>& counter, uint64_t n, const char* what) {
+        if ( n == 0 )
+            return;
 
-    out->failed += async_failed.exchange(0);
+        uint64_t prev = counter.fetch_add(n);
+        uint64_t now = prev + n;
+        if ( cfg.publish_error_log == 0 )
+            return;
 
-    if ( ctx )
-        EndLocked(/*commit=*/true, timeout_ms, out);
+        if ( prev == 0 || prev / cfg.publish_error_log != now / cfg.publish_error_log )
+            eprintf("%s: %s: %s [stream=%s n=%" PRIu64 " total=%" PRIu64 "]", w.path.c_str(), what,
+                    reason ? reason : "<null>", cfg.stream.c_str(), n, now);
+    };
+
+    account(w.stats->publish_errors, errors, "PublishError");
+    account(w.stats->publish_timeouts, timeouts, "PublishTimeout (outcome unknown)");
 }
 
 #endif

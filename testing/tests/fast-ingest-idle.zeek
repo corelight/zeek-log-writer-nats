@@ -17,6 +17,9 @@ redef LogNATS::stream_name_template = "test-sensor-logs";
 redef LogNATS::stream_subject_template = "test-sensor.logs.*";
 
 redef LogNATS::publish_mode = LogNATS::PUBLISH_FAST_INGEST;
+# Queue every write right away. The test sleeps in zeek_init(), where no
+# writer heartbeats run to queue buffered writes.
+redef LogNATS::fast_ingest_writer_batch = 1;
 redef LogNATS::fast_ingest_idle_timeout = 100msec;
 
 redef Log::write_buffer_size = 1;

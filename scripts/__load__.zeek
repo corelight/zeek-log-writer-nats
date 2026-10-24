@@ -140,38 +140,83 @@ export {
 
 	# With PUBLISH_FAST_INGEST, the requested number of messages per
 	# flow acknowledgement. The server starts lower and may adjust
-	# the value at runtime, but never above this one (1-65535).
+	# the value at runtime, but never above this one.
+	#
+	# nats-server (2.14, 2.15) uses at most 500 messages per flow
+	# acknowledgement, divided by the number of batches publishing to
+	# the stream concurrently. Larger values have no effect and are
+	# clamped to 500 with a warning (valid: 1-65535).
 	global fast_ingest_flow: count = 100 &redef;
 
 	# With PUBLISH_FAST_INGEST, the number of flow acknowledgements that
-	# may be outstanding before a write blocks waiting for the server (1-3).
+	# may be outstanding before publishing waits for the server (1-3).
 	global fast_ingest_max_outstanding_acks: count = 2 &redef;
 
-	# With PUBLISH_FAST_INGEST, the maximum time a write blocks waiting
-	# for a flow acknowledgement. Hitting it ends the batch, the next
-	# write starts a new one. Unlike PUBLISH_ASYNC with
-	# publish_async_no_stall, fast-ingest writes block rather than drop
-	# when the server applies backpressure.
-	global fast_ingest_ack_timeout: interval = 1000msec &redef;
+	# With PUBLISH_FAST_INGEST, log writers of a connection publishing to
+	# the same stream share one batch. The server divides its flow budget
+	# across the concurrent batches of a stream, so one shared batch gets
+	# the full budget. Writers of different streams can't share a batch:
+	# the stream is identified by stream_name_template, so it must name
+	# the stream the writer actually publishes to, also when
+	# create_stream is F.
+	#
+	# Each writer buffers fast_ingest_writer_batch formatted writes and
+	# queues them at once for the batch's publisher thread, which publishes
+	# them in order. Buffered writes are also queued on flush and with
+	# every writer heartbeat (Threading::heartbeat_interval).
+	#
+	# Outcomes are accounted to the writer that produced the message:
+	# acks, publish errors (definite failures such as lost messages or
+	# rejected batches), publish timeouts and dropped writes.
+	global fast_ingest_writer_batch: count = 64 &redef;
+
+	# With PUBLISH_FAST_INGEST, the maximum size in bytes of the messages
+	# queued for a shared batch's publisher thread. This bounds memory when
+	# the server can't keep up, see fast_ingest_no_stall.
+	global fast_ingest_queue_size: count = 64 * 1024 * 1024 &redef;
+
+	# With PUBLISH_FAST_INGEST, drop writes rather than block when the queue
+	# of the shared batch is full. A writer waits up to fast_ingest_stall_wait
+	# for space, then drops its buffered writes and counts them as dropped
+	# writes.
+	#
+	# If F, writers wait for space without limit. The server's backpressure
+	# then propagates into Zeek's log writer queues, which grow without bound
+	# under sustained overload.
+	global fast_ingest_no_stall = T &redef;
+
+	# With PUBLISH_FAST_INGEST and fast_ingest_no_stall, the maximum time a
+	# writer waits for queue space before dropping. This absorbs short
+	# bursts without blocking log writers for long.
+	global fast_ingest_stall_wait: interval = 50msec &redef;
+
+	# With PUBLISH_FAST_INGEST, the maximum time the publisher thread waits
+	# for a flow acknowledgement. Hitting it ends the batch. Messages in
+	# flight then are likely stored, but their outcome is unknown: the batch
+	# is committed to confirm what the server persisted (this needs orbit.c
+	# with the patch in docker/patches), and the rest are counted as publish
+	# timeouts, not publish errors. The next message starts a new batch.
+	#
+	# Short server pauses, e.g. while a full stream deletes old blocks, can
+	# exceed one second, so the default is five seconds, matching orbit.c's
+	# default. A batch that couldn't be committed lingers on the server
+	# until its batch timeout (10 seconds after its last message, see the
+	# server's jetstream limits max_batch_timeout), reducing the flow budget
+	# of the other batches of the stream meanwhile.
+	global fast_ingest_ack_timeout: interval = 5sec &redef;
 
 	# With PUBLISH_FAST_INGEST, continue a batch when the server detects
 	# lost messages. Lost messages are counted as publish errors. If F,
-	# a gap ends the batch and the next write starts a new one.
+	# a gap ends the batch and the next message starts a new one.
 	global fast_ingest_continue_on_gap: bool = T &redef;
 
-	# With PUBLISH_FAST_INGEST, a log flush (e.g. Log::flush()) also commits
-	# the current batch.
+	# With PUBLISH_FAST_INGEST, a log flush (e.g. Log::flush()) commits the
+	# shared batch once everything queued so far is published, waiting up
+	# to fast_ingest_ack_timeout.
 	#
-	# With PUBLISH_FAST_INGEST, commit a batch on the next write when no
-	# message has been published for this long. The server abandons
-	# batches after 10 seconds without traffic, so keep this below that.
-	# Set to 0sec to disable.
+	# With PUBLISH_FAST_INGEST, commit a batch when no message has been
+	# published for this long. The server abandons batches after 10
+	# seconds without traffic, so keep this below that. Set to 0sec to
+	# disable.
 	global fast_ingest_idle_timeout: interval = 5sec &redef;
-
-	# With PUBLISH_FAST_INGEST, log writers of a connection publishing to
-	# the same stream share one batch. Each writer buffers this many
-	# writes and publishes them to the batch at once, which keeps writers
-	# from contending on it per write. Buffered writes are also published
-	# on flush and with every writer heartbeat (Threading::heartbeat_interval).
-	global fast_ingest_writer_batch: count = 64 &redef;
 }

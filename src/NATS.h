@@ -13,22 +13,11 @@
 
 #include "Connection.h"
 #include "FastBatch.h"
+#include "WriterStats.h"
 
 using namespace zeek::logging;
 
 namespace zeek::plugin::Zeek_Log_Writer_NATS::detail {
-
-struct NATSWriterStats {
-    std::atomic<zeek_uint_t> dropped_writes = 0;
-    std::atomic<zeek_uint_t> publish_errors = 0;
-    std::atomic<zeek_uint_t> publish_acks = 0;
-    std::atomic<zeek_uint_t> publish_timeouts = 0;
-    // Pending publishes that have neither been acked,
-    // timed out, or otherwise failed. May go negative,
-    // but that's probably a bug. This value is exposed
-    // per writer as metric.
-    std::atomic<zeek_int_t> pending = 0;
-};
 
 class NATSWriter : public WriterBackend {
 public:
@@ -44,17 +33,17 @@ public:
     // messages affected by the error.
     void PublishError(natsStatus err, int js_err, const char* text, zeek_uint_t n = 1);
 
-    // Drop a write. That is something the log writer decided
+    // Drop n writes. That is something the log writer decided
     // to actively drop, rather than hit libnats limits.
-    void DropWrite(natsStatus err, const char* text);
+    void DropWrite(natsStatus err, const char* text, zeek_uint_t n = 1);
 
-    void IncrementPending() { ++writer_stats.pending; }
-    void DecrementPending() { --writer_stats.pending; }
+    void IncrementPending() { ++writer_stats->pending; }
+    void DecrementPending() { --writer_stats->pending; }
 
     // Return true if this write should be dropped to prevent stalling.
     bool MayStall() const {
         if ( publish_async_no_stall && publish_async_max_pending > 0 )
-            return writer_stats.pending >= publish_async_max_pending;
+            return writer_stats->pending >= publish_async_max_pending;
 
         return false;
     };
@@ -81,16 +70,11 @@ protected:
 
 #ifdef HAVE_ORBIT_FAST_PUBLISH
     // Buffer a single message for the connection's shared fast-ingest
-    // batch, publishing the buffer once fast_ingest_writer_batch is reached.
+    // batch, queueing the buffer once fast_ingest_writer_batch is reached.
     void FastIngestWrite(const char* data, int data_len);
 
-    // Publish all buffered messages to the shared batch at once.
+    // Queue all buffered messages for the shared batch at once.
     void FastIngestPublishBuffered();
-
-    // Account for the outcome reported by the shared batch. Messages with
-    // unknown outcome are publish errors, or dropped writes if at_finish
-    // is true.
-    void FastIngestAccount(const FastBatchOutcome& out, bool at_finish);
 #endif
 
 private:
@@ -105,10 +89,12 @@ private:
     std::string publish_mode;
 
 #ifdef HAVE_ORBIT_FAST_PUBLISH
-    // Shared by all writers of the connection. Outcomes are accounted
-    // to whichever writer observes them, so per-writer acks and errors
-    // are approximate while totals are exact.
+    // Shared by all writers of the connection publishing to the stream.
     std::shared_ptr<FastBatch> fast_batch;
+    // This writer as seen by the batch's publisher thread.
+    std::shared_ptr<FastBatchWriter> fast_writer;
+    // Formatted messages not yet queued for the shared batch.
+    std::vector<std::string> fast_buffered;
 #endif
 
     std::string url;
@@ -135,7 +121,9 @@ private:
     std::string json_timestamps;
     std::string path_escape_policy;
 
-    NATSWriterStats writer_stats;
+    // Shared with the fast-ingest publisher thread, which may account
+    // for this writer's messages after it's gone.
+    std::shared_ptr<NATSWriterStats> writer_stats = std::make_shared<NATSWriterStats>();
     zeek_uint_t publish_error_log;
     zeek_uint_t dropped_writes_log;
     int64_t publish_async_max_pending;
@@ -149,10 +137,9 @@ private:
     bool fast_ingest_continue_on_gap;
     int64_t fast_ingest_idle_timeout_ms;
     zeek_uint_t fast_ingest_writer_batch;
-#ifdef HAVE_ORBIT_FAST_PUBLISH
-    // Formatted messages not yet published to the shared batch.
-    std::vector<std::string> fast_buffered;
-#endif
+    zeek_uint_t fast_ingest_queue_size;
+    bool fast_ingest_no_stall;
+    int64_t fast_ingest_stall_wait_ms;
 
     zeek::telemetry::CounterPtr dropped_writes_total;
     zeek::telemetry::CounterPtr publish_errors_total;
