@@ -170,10 +170,8 @@ natsStatus FastBatch::AddLocked(const char* subject, const char* data, int data_
         out->error = batch_error;
     }
 
-    if ( out->error.empty() ) {
-        const char* last_error = nats_GetLastError(nullptr);
-        out->error = last_error ? last_error : natsStatus_GetText(s);
-    }
+    if ( out->error.empty() )
+        out->error = LastError(s);
 
     if ( jsFastPublish_IsClosed(ctx) )
         EndLocked(/*commit=*/false, 0, out);

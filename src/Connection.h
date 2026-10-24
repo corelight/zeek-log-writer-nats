@@ -23,6 +23,23 @@ inline Result Ok() { return Result{true, NATS_OK, std::nullopt}; }
 inline Result Error(natsStatus status, std::string msg) { return {false, status, std::move(msg)}; }
 
 /**
+ * The last libnats error of the calling thread, never NULL.
+ *
+ * libnats and orbit.c don't set an error for every failure, in which case
+ * nats_GetLastError() returns NULL. Falls back to the text of status s.
+ */
+inline const char* LastError(natsStatus s) {
+    if ( const char* error = nats_GetLastError(nullptr); error && *error )
+        return error;
+
+    if ( const char* text = natsStatus_GetText(s); text )
+        return text;
+
+    return "unknown error";
+}
+
+
+/**
  * Sharing policy for ConnectionFactory::Create()
  */
 enum class ConnectionSharingPolicy {

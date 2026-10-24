@@ -445,7 +445,7 @@ bool NATSWriter::Connect() {
     // Add the stream,
     if ( s = js_AddStream(nullptr, js, &cfg, NULL, &jerr); s != NATS_OK ) {
         eprintf("Failed to add stream (stream_name=%s stream_subject=%s): %s", stream_name.c_str(),
-                stream_subject.c_str(), nats_GetLastError(nullptr));
+                stream_subject.c_str(), LastError(s));
         jsCtx_Destroy(js);
         js = nullptr;
         return false;
@@ -497,7 +497,7 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     opts.MaxWait = publish_async_max_wait_ms;
 
     if ( s = js_PublishMsgAsync(js, &msg, &opts); s != NATS_OK )
-        PublishError(s, /*js_err=*/0, nats_GetLastError(nullptr));
+        PublishError(s, /*js_err=*/0, LastError(s));
     else
         IncrementPending();
 
@@ -649,7 +649,7 @@ bool NATSWriter::DoFinish(double network_time) {
     completeOpts.MaxWait = publish_async_complete_max_wait_ms;
 
     if ( s = js_PublishAsyncComplete(js, &completeOpts); s != NATS_OK ) {
-        eprintf("%s: DoFinish: PublishAsyncComplete failed: %s", Info().path, nats_GetLastError(nullptr));
+        eprintf("%s: DoFinish: PublishAsyncComplete failed: %s", Info().path, LastError(s));
 
         // Try to get the pending messages. Solely for reporting any
         // information we can figure out or if it'll fail.
@@ -661,8 +661,7 @@ bool NATSWriter::DoFinish(double network_time) {
             natsMsgList_Destroy(&pending);
         }
         else {
-            eprintf("%s: DoFinish: js_PublishAsyncGetPendingList() failed: %s", Info().path,
-                    nats_GetLastError(nullptr));
+            eprintf("%s: DoFinish: js_PublishAsyncGetPendingList() failed: %s", Info().path, LastError(s));
         }
     }
 
