@@ -1,0 +1,63 @@
+# @TEST-REQUIRES: have-nats
+# @TEST-REQUIRES: have-fast-ingest
+# @TEST-EXEC: private-nats-server start 4344
+# @TEST-EXEC: zeek $FILES/fast-ingest-accounting.zeek %INPUT > out 2> stderr; nats -s nats://127.0.0.1:4344 stream info test-fast --json | grep -o '"messages": *[0-9]*' > messages; private-nats-server stop 4344
+# @TEST-EXEC: btest-diff out
+# @TEST-EXEC: btest-diff messages
+# @TEST-EXEC: ! grep -E 'PublishError|PublishTimeout|Dropped|queue full' stderr
+#
+# @TEST-DOC: Without fast_ingest_no_stall, writers wait for space in the shared batch's queue instead of dropping.
+
+redef Log::default_writer = Log::WRITER_NATS;
+redef Log::write_buffer_size = 1;
+
+redef LogNATS::url = "nats://127.0.0.1:4344";
+redef LogNATS::stream_name_template = "test-fast";
+redef LogNATS::stream_subject_template = "test-fast.*";
+redef LogNATS::publish_subject_template = "test-fast.{path}";
+redef LogNATS::publish_mode = LogNATS::PUBLISH_FAST_INGEST;
+
+# Queue every write right away, the test sleeps in zeek_init(). The queue
+# only takes a write when it's empty, and a flow window of a single message
+# makes publishing wait for each message's ack.
+redef LogNATS::fast_ingest_writer_batch = 1;
+redef LogNATS::fast_ingest_flow = 1;
+redef LogNATS::fast_ingest_max_outstanding_acks = 1;
+redef LogNATS::fast_ingest_queue_size = 1;
+redef LogNATS::fast_ingest_no_stall = F;
+
+module Test;
+
+export {
+	redef enum Log::ID += { LOG };
+}
+
+event zeek_init()
+	{
+	Log::disable_stream(PacketFilter::LOG);
+	Log::create_stream(LOG, [$columns=FastIngestTest::Info, $path="test"]);
+
+	# Creates the stream and starts the batch.
+	FastIngestTest::write(LOG, "test", 1);
+	sleep(300msec);
+
+	# While the server is paused, the publisher thread waits for the flow
+	# ack of the second write. The third write fills the queue, the
+	# remaining eight wait for space.
+	system("kill -STOP $(cat nats-4344.pid)");
+	# system() runs in the background, let the pause take effect.
+	sleep(100msec);
+	FastIngestTest::write(LOG, "test", 1);
+	sleep(300msec);
+	FastIngestTest::write(LOG, "test", 9);
+	sleep(300msec);
+	system("kill -CONT $(cat nats-4344.pid)");
+
+	Log::flush(LOG);
+	}
+
+event zeek_done()
+	{
+	sleep(300msec);
+	FastIngestTest::report();
+	}
