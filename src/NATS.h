@@ -67,6 +67,14 @@ protected:
     // Try connect and setup the stream.
     bool Connect();
 
+    zeek::threading::formatter::JSON& Formatter() { return *formatter; }
+
+    const std::string& PublishSubject() const { return publish_subject; }
+
+    zeek::ODesc& Desc() { return desc; }
+
+    std::shared_ptr<Connection>& Conn() { return conn; }
+
 private:
     std::shared_ptr<Connection> conn = nullptr;
     jsCtx* js = nullptr;
