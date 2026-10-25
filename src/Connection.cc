@@ -302,6 +302,24 @@ Result Connection::JetStream(jsCtx** js, int64_t publish_async_max_pending, int6
 }
 
 
+Result Connection::Publish(natsMsg* msg) {
+    natsStatus s;
+
+// Older version
+#if NATS_VERSION_MAJOR == 3 && NATS_VERSION_MINOR < 12
+    if ( epoch == 0 )
+        return Error(NATS_ERR, "NATS connection not yet ready");
+#endif
+
+    if ( s = natsConnection_PublishMsg(natsConn, msg); s != NATS_OK ) {
+        std::string error = nats_GetLastError(nullptr);
+        return Error(s, std::move(error));
+    }
+
+    return Ok();
+}
+
+
 std::shared_ptr<Connection> Connection::Create(ConnectionSharingPolicy sharing_policy, ConnectionOptions opts) {
     // If exclusive, just hand out a new connection.
     if ( sharing_policy == ConnectionSharingPolicy::EXCLUSIVE ) {

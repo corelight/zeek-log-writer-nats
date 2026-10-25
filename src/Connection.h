@@ -109,6 +109,11 @@ public:
      */
     uint64_t Epoch() { return epoch; }
 
+    /**
+     * Publish the given low-level message on the underlying natsConnection.
+     */
+    Result Publish(natsMsg* msg);
+
     static std::shared_ptr<Connection> Create(ConnectionSharingPolicy policy, ConnectionOptions opts);
 
 protected:
