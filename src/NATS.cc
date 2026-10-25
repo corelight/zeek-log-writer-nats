@@ -322,7 +322,8 @@ bool NATSWriter::Connect() {
         return true;
 
     debug("Creating a JetStream instance!");
-    auto [ok, error] = conn->JetStream(&js, publish_async_max_pending, publish_async_stall_wait_ms, _jsPubAck, this);
+    auto [ok, status, error] =
+        conn->JetStream(&js, publish_async_max_pending, publish_async_stall_wait_ms, _jsPubAck, this);
     if ( ! ok )
         return false;
 

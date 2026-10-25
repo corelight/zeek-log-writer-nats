@@ -1,6 +1,7 @@
 #pragma once
 
 #include <nats/nats.h>
+#include <nats/status.h>
 #include <atomic>
 #include <map>
 #include <memory>
@@ -12,11 +13,10 @@
 namespace zeek::plugin::Zeek_Log_Writer_NATS::detail {
 
 // Go'ish result type
-using Result = std::tuple<bool, std::optional<std::string>>;
+using Result = std::tuple<bool, natsStatus, std::optional<std::string>>;
 
-inline Result Ok() { return Result{true, std::nullopt}; }
-inline Result Error(std::string msg) { return {false, std::move(msg)}; }
-
+inline Result Ok() { return Result{true, NATS_OK, std::nullopt}; }
+inline Result Error(natsStatus status, std::string msg) { return {false, status, std::move(msg)}; }
 
 /**
  * Sharing policy for ConnectionFactory::Create()
