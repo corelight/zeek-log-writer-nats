@@ -41,10 +41,15 @@ zeek_plugin_cc(src/Plugin.cc)
 zeek_plugin_cc(src/Connection.cc)
 zeek_plugin_cc(src/NATS.cc)
 zeek_plugin_cc(src/NATSCoreWriter.cc)
+zeek_plugin_cc(src/NATSFastPublishWriter.cc)
 zeek_plugin_link_library(${NATS_LIBRARIES})
+
+zeek_get_plugin_target(plugin_target Zeek Log_Writer_NATS)
 
 zeek_plugin_dist_files(README.md CHANGES COPYING VERSION)
 zeek_plugin_end()
+
+target_link_libraries(${plugin_target} PRIVATE jetstream_extra_static)
 
 if ("${PROJECT_SOURCE_DIR}" STREQUAL "${CMAKE_SOURCE_DIR}")
     # Allows building rpm/deb packages via "make package" in build dir.

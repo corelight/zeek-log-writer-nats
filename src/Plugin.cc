@@ -12,6 +12,7 @@
 
 #include "NATS.h"
 #include "NATSCoreWriter.h"
+#include "NATSFastPublishWriter.h"
 #include "config.h"
 
 namespace zeek::plugin::Zeek_Log_Writer_NATS {
@@ -23,6 +24,7 @@ using namespace zeek::plugin::Zeek_Log_Writer_NATS;
 zeek::plugin::Configuration Plugin::Configure() {
     AddComponent(new zeek::logging::Component("NATS", detail::NATSWriter::Instantiate));
     AddComponent(new zeek::logging::Component("NATS_CORE", detail::NATSCoreWriter::Instantiate));
+    AddComponent(new zeek::logging::Component("NATS_FAST", detail::NATSFastPublishWriter::Instantiate));
 
     zeek::plugin::Configuration config;
     config.name = "Zeek::Log_Writer_NATS";
