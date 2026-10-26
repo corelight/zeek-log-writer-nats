@@ -5,7 +5,7 @@
 
 using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
 
-NATSCoreWriter::NATSCoreWriter(WriterFrontend* frontend) : NATSWriter(frontend) {}
+NATSCoreWriter::NATSCoreWriter(WriterFrontend* frontend) : NATSWriter(frontend, /*send_heartbeats=*/false) {}
 
 bool NATSCoreWriter::DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) {
     natsStatus s = NATS_OK;

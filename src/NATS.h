@@ -29,10 +29,12 @@ struct NATSWriterStats {
 
 class NATSWriter : public WriterBackend {
 public:
-    explicit NATSWriter(WriterFrontend* frontend);
+    explicit NATSWriter(WriterFrontend* frontend, bool send_heartbeats);
     ~NATSWriter() override;
 
-    static WriterBackend* Instantiate(WriterFrontend* frontend) { return new NATSWriter(frontend); }
+    static WriterBackend* Instantiate(WriterFrontend* frontend) {
+        return new NATSWriter(frontend, /*send_heartbeats=*/false);
+    }
 
     // Callback for message acknowledgements.
     void PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate);
