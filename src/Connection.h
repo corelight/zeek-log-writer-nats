@@ -115,6 +115,11 @@ public:
     Result Publish(natsMsg* msg);
 
     /**
+     * @return pointer to underlying natsConnection.
+     */
+    natsConnection* RawConnection() { return natsConn; }
+
+    /**
      * Helper tuple returned from Create()
      */
     using CreateResult = std::tuple<bool, std::shared_ptr<Connection>, std::optional<std::string>>;
