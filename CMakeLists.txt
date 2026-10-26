@@ -20,6 +20,8 @@ else ()
     set(NATS_LIBRARIES cnats::nats)
 endif ()
 
+add_subdirectory(./3rdparty/orbit.c EXCLUDE_FROM_ALL)
+
 # Establish version numbers in config.h
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" VERSION LIMIT_COUNT 1)
 

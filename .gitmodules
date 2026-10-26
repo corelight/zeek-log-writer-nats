@@ -1,0 +1,3 @@
+[submodule "3rdparty/orbit.c"]
+	path = 3rdparty/orbit.c
+	url = git@github.com:synadia-io/orbit.c.git
