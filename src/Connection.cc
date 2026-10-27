@@ -179,21 +179,29 @@ Result Connection::StartConnect() {
         return Error(s, "Failed to SetRetryOnFailedConnect: " + error);
     }
 
-    if ( s = natsConnection_Connect(&natsConn, natsOpts); (s != NATS_OK && s != NATS_NOT_YET_CONNECTED) ) {
-        std::string error = nats_GetLastError(nullptr);
-        return Error(s, error + "[url=" + opts.url + "]");
+    {
+        // Start connecting with the lock held such that if natsConnection_Connect()
+        // returns with NATS_NOT_YET_CONNECTED and the background thread immediately
+        // invokes the connect_cb, we don't overwrite epoch with a stale value.
+        // callback registered above
+        std::scoped_lock lock{cb_state->mtx};
+
+        if ( s = natsConnection_Connect(&natsConn, natsOpts); (s != NATS_OK && s != NATS_NOT_YET_CONNECTED) ) {
+            std::string error = nats_GetLastError(nullptr);
+            return Error(s, error + "[url=" + opts.url + "]");
+        }
+
+        // Ensure ~Defer() won't delete it.
+        tmp_holder = nullptr;
+
+        // Initialize epoch with 1 if it's already ready, otherwise
+        // the connect_cb will set epoch appropriately.
+        epoch = s == NATS_NOT_YET_CONNECTED ? 0 : 1;
+
+        // Log a connected messages - happens in connected_cb otherwise.
+        if ( epoch == 1 )
+            eprintf("Connected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
     }
-
-    // Ensure ~Defer() won't delete it.
-    tmp_holder = nullptr;
-
-    // Initialize epoch with 1 if it's already ready, otherwise
-    // the connect_cb will set epoch appropriately.
-    epoch = s == NATS_NOT_YET_CONNECTED ? 0 : 1;
-
-    // Log a connected messages - happens in connected_cb otherwise.
-    if ( epoch == 1 )
-        eprintf("Connected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
 
     return Ok();
 }
