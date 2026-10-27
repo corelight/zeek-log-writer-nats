@@ -136,6 +136,12 @@ protected:
     // Deleted in closed_cb(), set in StartConnect()
     std::shared_ptr<CallbackState> cb_state;
 
+    // Protect setting of natsConn and cb_state.
+    //
+    // TODO: Remove this and its usages when the nats.c dependency is
+    // upgraded to >=3.12 CLOSED callback, it shouldn't be needed.
+    std::mutex mtx;
+
 private:
     std::atomic<uint64_t> epoch{0};
     static std::mutex connections_mtx;

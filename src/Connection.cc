@@ -80,15 +80,27 @@ private:
 Connection::Connection(ConnectionOptions opts) : opts(std::move(opts)) {}
 
 Connection::~Connection() {
-    if ( cb_state ) {
-        // Unset conn such that the CLOSED callback
-        // will delete cb_state.
-        std::scoped_lock lock{cb_state->mtx};
-        cb_state->conn = nullptr;
+    std::shared_ptr<CallbackState> state;
+    natsConnection* conn = nullptr;
+
+    // Fetch current values under lock and unset natsConn
+    // to avoid racing with the CLOSED callback.
+    {
+        std::scoped_lock lock{mtx};
+        state = cb_state;
+        conn = natsConn;
+        natsConn = nullptr;
     }
 
-    if ( natsConn )
-        natsConnection_Destroy(natsConn);
+    if ( state ) {
+        // Unset conn such that the CLOSED callback
+        // will delete cb_state.
+        std::scoped_lock lock{state->mtx};
+        state->conn = nullptr;
+    }
+
+    if ( conn )
+        natsConnection_Destroy(conn);
 }
 
 Result Connection::StartConnect() {
@@ -244,12 +256,13 @@ void Connection::ConnectionCallback(natsConnection* nc, ConnectionCallbackType t
             if ( epoch == 0 ) {
                 // XXX: Should only get here if the initial connection wasn't
                 //      properly established and the first StartConnect()
-                //      returned NATS_NOT_YET_CONNECTED.
+                //      returned NATS_NOT_YET_CONNECTED and running < 3.12.
+                //      Remove this all when the plugin depends on >=3.12.
                 //
                 // In nats.c, there's was a bug that was fixed with commit
                 // 77843e72 (3.12, Oct 17, 2025) that would cause CLOSED
                 // callbacks in these scenarios. This branch should not be
-                // reached with version 3.15 or later.
+                // reached with version 3.12 or later.
                 //
                 // Destroy this connection (safe?) and initiate another
                 // StartConnect() immediately. The outer closed_cb()
@@ -257,13 +270,24 @@ void Connection::ConnectionCallback(natsConnection* nc, ConnectionCallbackType t
 #if NATS_VERSION_MAJOR > 3 || (NATS_VERSION_MAJOR == 3 && NATS_VERSION_MINOR >= 12)
                 eprintf("Unexpected CLOSED event!");
 #endif
-                cb_state->conn = nullptr;
-                cb_state = nullptr;
+                {
+                    // Modify these under the Connection's lock.
+                    std::scoped_lock lock{mtx};
+                    cb_state->conn = nullptr;
+                    cb_state = nullptr;
 
-                natsConnection_Destroy(natsConn);
-                natsConn = nullptr;
+                    // Unless the destructor unset natsConn, destroy it
+                    // and attempt to reconnect.
+                    if ( natsConn ) {
+                        natsConnection_Destroy(natsConn);
+                        natsConn = nullptr;
 
-                StartConnect();
+                        if ( auto [ok, status, error] = StartConnect(); ! ok ) {
+                            // This should really not fail here, just be loud.
+                            eprintf("Unexpected StartConnect error: %s", error->c_str());
+                        }
+                    }
+                }
             }
 
             break;
