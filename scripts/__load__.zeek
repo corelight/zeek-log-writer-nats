@@ -128,4 +128,10 @@ export {
 
 	# Amount of time to wait for async publish at shutdown.
 	global publish_async_complete_max_wait: interval = 1000msec &redef;
+
+	# Options when using Log::WRITER_NATS_FAST
+	global fast_publish_flow = 100 &redef;
+	global fast_publish_max_batch_size = 1000 &redef;
+	global fast_publish_max_outstanding_acks = 16 &redef;
+	global fast_publish_commit_timeout = 5sec &redef;
 }

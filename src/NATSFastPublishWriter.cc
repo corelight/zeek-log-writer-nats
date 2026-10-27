@@ -10,7 +10,36 @@
 using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
 
 NATSFastPublishWriter::NATSFastPublishWriter(WriterFrontend* frontend)
-    : NATSWriter(frontend, /*send_heartbeats=*/true) {}
+    : NATSWriter(frontend, /*send_heartbeats=*/true) {
+    constexpr uint64_t uint16max = std::numeric_limits<uint16_t>::max();
+
+    auto tmp_flow = zeek::id::find_val<zeek::StringVal>("LogNATS::fast_publish_flow")->AsCount();
+
+    if ( tmp_flow > uint16max ) {
+        eprintf("flow value too large %" PRIu64, tmp_flow);
+        tmp_flow = uint16max;
+    }
+
+    flow = tmp_flow;
+
+    auto tmp_max_outstanding_acks =
+        zeek::id::find_val<zeek::StringVal>("LogNATS::fast_publish_max_outstanding_acks")->AsCount();
+
+    if ( tmp_max_outstanding_acks > uint16max ) {
+        eprintf("max_outstanding_acks too large: %" PRIu64, tmp_max_outstanding_acks);
+        tmp_max_outstanding_acks = uint16max;
+    }
+
+    max_outstanding_acks = tmp_max_outstanding_acks;
+
+    max_batch_size = zeek::id::find_val<zeek::StringVal>("LogNATS::fast_publish_max_batch_size")->AsCount();
+    commit_timeout_ms =
+        static_cast<int64_t>(zeek::id::find_val("LogNATS::fast_publish_commit_timeout")->AsInterval() * 1000);
+
+    debug("fast_publish: path=%s flow=%" PRIu16 " max_batch_size=%zu max_outstanding_acks=%" PRIu16
+          " commit_timeout_ms=%" PRId64,
+          Info().path, flow, max_batch_size, max_outstanding_acks, commit_timeout_ms);
+}
 
 namespace {
 void fp_err_handler(natsStatus status, const char* description, void* closure) {
@@ -39,6 +68,8 @@ bool NATSFastPublishWriter::DoWrite(int num_fields, const threading::Field* cons
 
         fp_opts.ErrHandler = fp_err_handler;
         fp_opts.ErrHandlerClosure = this;
+        fp_opts.Flow = flow;
+        fp_opts.MaxOutstandingAcks = max_outstanding_acks;
         fp_opts.ContinueOnGap = continue_on_gap;
 
         natsConnection* nc = Conn()->RawConnection();
@@ -82,7 +113,7 @@ bool NATSFastPublishWriter::DoWrite(int num_fields, const threading::Field* cons
             PublishError(s, 0, "jsFastPublish_CommitMsg() failed");
         }
         else {
-            debug("Commit Sequence=%" PRIu64 " Count=%" PRIu64, pub_ack->Sequence, pub_ack->Count);
+            // debug("Commit Sequence=%" PRIu64 " Count=%" PRIu64, pub_ack->Sequence, pub_ack->Count);
 
             jsPubAck_Destroy(pub_ack); // should we do something with it? metrics?
             pub_ack = nullptr;
@@ -141,7 +172,7 @@ bool NATSFastPublishWriter::CommitBatch() {
         eprintf("jsFastPublish_Close() failed: %s", status_str);
     }
 
-    debug("commit Sequence=%" PRIu64 " Count=%" PRIu64, pub_ack->Sequence, pub_ack->Count);
+    // debug("Commit Sequence=%" PRIu64 " Count=%" PRIu64, pub_ack->Sequence, pub_ack->Count);
 
     jsPubAck_Destroy(pub_ack); // should we do something with it? metrics?
     pub_ack = nullptr;

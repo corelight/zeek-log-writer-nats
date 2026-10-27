@@ -35,8 +35,11 @@ private:
     jsFastPublishCtx* fp_ctx = nullptr;
 
     size_t batch_size = 0;
-    size_t max_batch_size = 1000;
-    int64_t commit_timeout_ms = 5000;
+    size_t max_batch_size;
+    uint16_t flow;
+    uint16_t max_outstanding_acks;
+    int64_t commit_timeout_ms;
+
     bool continue_on_gap = true;
 };
 
