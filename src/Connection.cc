@@ -320,12 +320,14 @@ Result Connection::Publish(natsMsg* msg) {
 }
 
 
-std::shared_ptr<Connection> Connection::Create(ConnectionSharingPolicy sharing_policy, ConnectionOptions opts) {
+Connection::CreateResult Connection::Create(ConnectionSharingPolicy sharing_policy, ConnectionOptions opts) {
     // If exclusive, just hand out a new connection.
     if ( sharing_policy == ConnectionSharingPolicy::EXCLUSIVE ) {
         auto conn = std::make_shared<Connection>(std::move(opts));
-        conn->StartConnect();
-        return conn;
+        if ( auto [ok, status, error] = conn->StartConnect(); ! ok )
+            return {false, nullptr, *error};
+
+        return {true, conn, std::nullopt};
     }
 
     std::string url = opts.url;
@@ -338,7 +340,7 @@ std::shared_ptr<Connection> Connection::Create(ConnectionSharingPolicy sharing_p
     if ( it != connections.end() ) {
         conn = it->second.lock();
         if ( conn )
-            return conn;
+            return {true, conn, std::nullopt};
     }
 
     conn = std::make_shared<Connection>(std::move(opts));
@@ -346,8 +348,12 @@ std::shared_ptr<Connection> Connection::Create(ConnectionSharingPolicy sharing_p
     // Keep a weak-pointer for this connection around.
     connections[url] = conn;
 
-    conn->StartConnect();
-    return conn;
+    if ( auto [ok, status, error] = conn->StartConnect(); ! ok ) {
+        connections.erase(url);
+        return {false, nullptr, *error};
+    }
+
+    return {true, conn, std::nullopt};
 }
 
 // Static connection members.

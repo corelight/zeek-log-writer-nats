@@ -311,8 +311,14 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
     };
 
     // Create will start connection establishment!
-    conn = Connection::Create(sharing_policy, conn_opts);
+    auto [ok, tmp_conn, error] = Connection::Create(sharing_policy, conn_opts);
 
+    if ( ! ok ) {
+        Error(Fmt("Connection::Create() failed: %s", error->c_str()));
+        return false;
+    }
+
+    conn = std::move(tmp_conn);
     return true;
 }
 

@@ -114,7 +114,20 @@ public:
      */
     Result Publish(natsMsg* msg);
 
-    static std::shared_ptr<Connection> Create(ConnectionSharingPolicy policy, ConnectionOptions opts);
+    /**
+     * Helper tuple returned from Create()
+     */
+    using CreateResult = std::tuple<bool, std::shared_ptr<Connection>, std::optional<std::string>>;
+
+    /**
+     * Create a new NATS connection using the given connection sharing policy.
+     *
+     * The connection may or may not be already connected when this call
+     * returns. The underlying libnats library will retry unless the options
+     * are invalid. If you get {false, null, error}, don't retry, something is
+     * most likely wrong with the provided options. Check the error message.
+     */
+    static CreateResult Create(ConnectionSharingPolicy policy, ConnectionOptions opts);
 
 protected:
     ConnectionOptions opts;
