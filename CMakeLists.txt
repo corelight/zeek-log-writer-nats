@@ -4,7 +4,6 @@ project(Zeek_Log_Writer_NATS)
 
 find_package(Zeek CONFIG REQUIRED)
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${Zeek_DIR})
-set(BRO_PLUGIN_INSTALL_ROOT ${CMAKE_INSTALL_PREFIX}/lib/zeek/plugins)
 
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -37,7 +36,9 @@ include(ZeekPlugin)
 
 zeek_plugin_begin(Zeek Log_Writer_NATS)
 zeek_plugin_cc(src/Plugin.cc)
+zeek_plugin_cc(src/Connection.cc)
 zeek_plugin_cc(src/NATS.cc)
+zeek_plugin_cc(src/NATSCoreWriter.cc)
 zeek_plugin_link_library(${NATS_LIBRARIES})
 
 zeek_plugin_dist_files(README.md CHANGES COPYING VERSION)

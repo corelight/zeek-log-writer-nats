@@ -7,7 +7,15 @@ zeek_nats_log_writer_backend_publish_errors_total, [default, conn], 3.0
 zeek_nats_log_writer_backend_publish_errors_total, [default, ssl], 1.0
 zeek_nats_log_writer_backend_publish_errors_total, [default, http], 1.0
 zeek_nats_log_writer_backend_publish_errors_total, [default, dns], 1.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [default, conn], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [default, ssl], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [default, http], 0.0
+zeek_nats_log_writer_backend_publish_timeouts_total, [default, dns], 0.0
 zeek_nats_log_writer_backend_publish_acks_total, [default, conn], 0.0
 zeek_nats_log_writer_backend_publish_acks_total, [default, ssl], 0.0
 zeek_nats_log_writer_backend_publish_acks_total, [default, http], 0.0
 zeek_nats_log_writer_backend_publish_acks_total, [default, dns], 0.0
+zeek_nats_log_writer_backend_publishes_pending, [default, conn], 0.0
+zeek_nats_log_writer_backend_publishes_pending, [default, ssl], 0.0
+zeek_nats_log_writer_backend_publishes_pending, [default, http], 0.0
+zeek_nats_log_writer_backend_publishes_pending, [default, dns], 0.0

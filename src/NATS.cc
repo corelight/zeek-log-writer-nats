@@ -9,12 +9,13 @@
 #include "zeek/logging/WriterFrontend.h"
 #include "zeek/telemetry/Manager.h"
 
+#include "Connection.h"
 #include "Plugin.h"
 
 using namespace zeek::logging;
 using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
 
-NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
+NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*send_heartbeats=*/false) {
     // Initialize the NATS metrics with callbacks that use
     // the embedded WriterStats in in a NATSWriter instance.
     std::vector<telemetry::LabelView> labels = {{"filter-name", frontend->GetFilterName()},
@@ -31,6 +32,12 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
                               "Publish errors reported from the NATS server via the installed AckHandler", "",
                               [stats = &writer_stats]() { return static_cast<double>(stats->publish_errors); }),
 
+    publish_timeouts_total =
+        zeek::telemetry_mgr
+            ->CounterInstance("zeek", "nats-log-writer-backend-publish-timeouts", labels,
+                              "Publish timeouts when publish_async_max_wait or publish_async_stall_wait_ms were hit",
+                              "", [stats = &writer_stats]() { return static_cast<double>(stats->publish_timeouts); }),
+
     publish_acks_total =
         zeek::telemetry_mgr->CounterInstance("zeek", "nats-log-writer-backend-publish-acks", labels,
                                              "Publish acknowledgements reported via the installed AckHandler", "",
@@ -38,9 +45,15 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
                                                  return static_cast<double>(stats->publish_acks);
                                              });
 
+    publishes_pending =
+        zeek::telemetry_mgr->GaugeInstance("zeek", "nats-log-writer-backend-publishes-pending", labels,
+                                           "In-flight publishes neither confirmed nor failed", "",
+                                           [stats = &writer_stats]() { return static_cast<double>(stats->pending); });
+
     // Read script-layer globals on the main thread. DoInit runs in the writer
     // backend thread where global_scope() is not safe to access.
     url = zeek::id::find_val<zeek::StringVal>("LogNATS::url")->ToStdString();
+    conn_sharing_policy = zeek::obj_desc_short(zeek::id::find_val("LogNATS::connection_sharing_policy").get());
     publish_subject_template = zeek::id::find_val<zeek::StringVal>("LogNATS::publish_subject_template")->ToStdString();
     stream_name_template = zeek::id::find_val<zeek::StringVal>("LogNATS::stream_name_template")->ToStdString();
     stream_subject_template = zeek::id::find_val<zeek::StringVal>("LogNATS::stream_subject_template")->ToStdString();
@@ -52,39 +65,49 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend) {
     publish_error_log = zeek::id::find_val("LogNATS::publish_error_log")->AsCount();
     dropped_writes_log = zeek::id::find_val("LogNATS::dropped_writes_log")->AsCount();
     publish_async_max_pending = zeek::id::find_val("LogNATS::publish_async_max_pending")->AsInt();
+    publish_async_max_wait_ms =
+        static_cast<int64_t>(zeek::id::find_val("LogNATS::publish_async_max_wait")->AsInterval() * 1000);
     publish_async_stall_wait_ms =
         static_cast<int64_t>(zeek::id::find_val("LogNATS::publish_async_stall_wait")->AsInterval() * 1000);
+    publish_async_no_stall = zeek::id::find_val("LogNATS::publish_async_no_stall")->AsBool();
     publish_async_complete_max_wait_ms =
         static_cast<int64_t>(zeek::id::find_val("LogNATS::publish_async_complete_max_wait")->AsInterval() * 1000);
+    connection_timeout_ms =
+        static_cast<int64_t>(zeek::id::find_val("LogNATS::connection_timeout")->AsInterval() * 1000);
+    ping_interval_ms = static_cast<int64_t>(zeek::id::find_val("LogNATS::ping_interval")->AsInterval() * 1000);
+    reconnect_wait_ms = static_cast<int64_t>(zeek::id::find_val("LogNATS::reconnect_wait")->AsInterval() * 1000);
+    jitter_ms = static_cast<int64_t>(zeek::id::find_val("LogNATS::jitter")->AsInterval() * 1000);
+    jitter_tls_ms = static_cast<int64_t>(zeek::id::find_val("LogNATS::jitter_tls")->AsInterval() * 1000);
 }
 
 NATSWriter::~NATSWriter() {
     debug("destructor");
-    if ( opts )
-        natsOptions_Destroy(opts);
-
-    if ( conn )
-        natsConnection_Destroy(conn);
 
     if ( js )
         jsCtx_Destroy(js);
 
+    conn = nullptr;
+
     // The counter instances outlive the NATSWriter, but the callbacks
     // point at the embedded writer_stats, so ensure to remove them.
     dropped_writes_total->RemoveCallback();
-    publish_acks_total->RemoveCallback();
     publish_errors_total->RemoveCallback();
+    publish_timeouts_total->RemoveCallback();
+    publish_acks_total->RemoveCallback();
+    publishes_pending->RemoveCallback();
 }
 
 namespace {
 void _jsPubAck(jsCtx* js, natsMsg* msg, jsPubAck* pa, jsPubAckErr* pae, void* closure) {
     auto* writer = static_cast<NATSWriter*>(closure);
 
+    writer->DecrementPending();
+
     if ( pa != nullptr ) {
         writer->PublishAck(pa->Stream, pa->Sequence, pa->Domain, pa->Duplicate);
     }
     else if ( pae != nullptr ) {
-        writer->PublishError(pae->ErrCode, pae->ErrText);
+        writer->PublishError(pae->Err, pae->ErrCode, pae->ErrText);
     }
 
     natsMsg_Destroy(msg);
@@ -137,19 +160,33 @@ void NATSWriter::PublishAck(const char* stream, uint64_t sequence, const char* d
     ++writer_stats.publish_acks;
 }
 
-void NATSWriter::PublishError(int code, const char* text) {
-    // May be called asynchronously and from DoWrite(), so don't use
-    // Error() or Fmt() and instead go through fprintf and use a lock.
-    static std::mutex mx;
-    std::lock_guard lock(mx);
-    if ( publish_error_log > 0 ) {
-        if ( writer_stats.publish_errors % publish_error_log == 0 ) {
-            std::fprintf(stderr, "NATS/%s: PublishError: %s [pid=%d code=%d publish_errors=%" PRIu64 "]\n", Name(),
-                         text, getpid(), code, writer_stats.publish_errors + 1);
-        }
-    }
+void NATSWriter::PublishError(natsStatus err, int js_err, const char* text) {
+    auto errors = ++writer_stats.publish_errors;
 
-    writer_stats.publish_errors++;
+    // Track timeouts as a separate metric.
+    if ( err == NATS_TIMEOUT )
+        ++writer_stats.publish_timeouts;
+
+    if ( publish_error_log == 0 )
+        return;
+
+    if ( errors == 1 || errors % publish_error_log == 0 ) {
+        const char* err_text = natsStatus_GetText(err);
+        eprintf("%s: PublishError: %s [pid=%d err=%d text=%s js_err=%d publish_errors=%" PRIu64 "]", Info().path,
+                text ? text : "<null>", getpid(), err, err_text ? err_text : "<null>", js_err, errors);
+    }
+}
+
+
+void NATSWriter::DropWrite(natsStatus err, const char* text) {
+    auto dropped_writes = ++writer_stats.dropped_writes;
+
+    if ( dropped_writes_log == 0 )
+        return;
+
+    if ( dropped_writes == 1 || dropped_writes % dropped_writes_log == 0 )
+        eprintf("%s: Dropped writes [pid=%d err=%d text=%s dropped_writes=%" PRIu64 "]", Info().path, getpid(), err,
+                text, dropped_writes);
 }
 
 bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) {
@@ -183,7 +220,7 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
                 include_unset_fields = false;
             }
             else {
-                Error(Fmt("NATS: Unknown value for include_unset_fields %s:%s", name, value));
+                eprintf("Unknown value for include_unset_fields %s:%s", name, value);
                 return false;
             }
         }
@@ -195,12 +232,15 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
                 create_stream = false;
             }
             else {
-                Error(Fmt("NATS: Unknown value for create_stream %s:%s", name, value));
+                eprintf("Unknown value for create_stream %s:%s", name, value);
                 return false;
             }
         }
+        else if ( zeek::util::streq(name, "connection_sharing_policy") ) {
+            conn_sharing_policy = value;
+        }
         else {
-            Error(Fmt("NATS: Unknown map config %s", name));
+            eprintf("Unknown map config %s", name);
             return false;
         }
     }
@@ -216,7 +256,7 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         path = escape_path(info.path, "\\x");
     }
     else {
-        Error(Fmt("NATS: Invalid path_escape_policy %s", path_escape_policy.c_str()));
+        eprintf("Invalid path_escape_policy %s", path_escape_policy.c_str());
         return false;
     }
 
@@ -244,57 +284,61 @@ bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const thread
         tf = zeek::threading::formatter::JSON::TS_ISO8601;
     }
     else {
-        Error(Fmt("NATS: Invalid json_timestamps format %s", json_timestamps.c_str()));
+        eprintf("Invalid json_timestamps format %s", json_timestamps.c_str());
         return false;
     }
     formatter = std::make_unique<zeek::threading::formatter::JSON>(this, tf, include_unset_fields);
 
-    if ( s = natsOptions_Create(&opts); s != NATS_OK ) {
-        Error("NATS: Could not create options");
+    ConnectionSharingPolicy sharing_policy;
+    if ( conn_sharing_policy == "LogNATS::CONNECTION_EXCLUSIVE" ) {
+        sharing_policy = ConnectionSharingPolicy::EXCLUSIVE;
+    }
+    else if ( conn_sharing_policy == "LogNATS::CONNECTION_SHARED" ) {
+        sharing_policy = ConnectionSharingPolicy::SHARED;
+    }
+    else {
+        eprintf("Invalid connection sharing policy: %s", conn_sharing_policy.c_str());
         return false;
     }
 
-    if ( s = natsOptions_SetURL(opts, url.c_str()); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed to SetURL %s: %s", url.c_str(), nats_GetLastError(nullptr)));
-        return false;
-    }
-    if ( s = jsOptions_Init(&jsOpts); s != NATS_OK ) {
-        natsOptions_Destroy(opts);
-        Error(Fmt("NATS: Failed to init JetStream options: %s", nats_GetLastError(nullptr)));
+    ConnectionOptions conn_opts{
+        .url = url,
+        .connection_timeout_ms = connection_timeout_ms,
+        .ping_interval_ms = ping_interval_ms,
+        .reconnect_wait_ms = reconnect_wait_ms,
+        .jitter_ms = jitter_ms,
+        .jitter_tls_ms = jitter_tls_ms,
+    };
+
+    // Create will start connection establishment!
+    auto [ok, tmp_conn, error] = Connection::Create(sharing_policy, conn_opts);
+
+    if ( ! ok ) {
+        Error(Fmt("Connection::Create() failed: %s", error->c_str()));
         return false;
     }
 
-    jsOpts.PublishAsync.MaxPending = publish_async_max_pending;
-    jsOpts.PublishAsync.AckHandler = _jsPubAck;
-    jsOpts.PublishAsync.AckHandlerClosure = this;
-    jsOpts.PublishAsync.StallWait = publish_async_stall_wait_ms;
-
+    conn = std::move(tmp_conn);
     return true;
 }
 
+// This only ensures that the js instance exists!
 bool NATSWriter::Connect() {
-    if ( conn )
+    if ( js )
+        return true;
+
+    debug("Creating a JetStream instance!");
+    auto [ok, status, error] =
+        conn->JetStream(&js, publish_async_max_pending, publish_async_stall_wait_ms, _jsPubAck, this);
+    if ( ! ok )
+        return false;
+
+    debug("JetStream context created!");
+
+    if ( ! create_stream )
         return true;
 
     natsStatus s;
-    if ( s = natsConnection_Connect(&conn, opts); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed to connect to %s: %s", url.c_str(), nats_GetLastError(nullptr)));
-        return false;
-    }
-
-    debug("Connected!");
-
-    if ( s = natsConnection_JetStream(&js, conn, &jsOpts); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed to initialize JetStream: %s", nats_GetLastError(nullptr)));
-        natsConnection_Destroy(conn);
-        conn = nullptr;
-        return false;
-    }
-
-    if ( ! create_stream ) {
-        return true;
-    }
-
     jsErrCode jerr;
     jsStreamConfig cfg;
 
@@ -315,12 +359,10 @@ bool NATSWriter::Connect() {
 
     // Add the stream,
     if ( s = js_AddStream(nullptr, js, &cfg, NULL, &jerr); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed to add stream (stream_name=%s stream_subject=%s): %s", stream_name.c_str(),
-                  stream_subject.c_str(), nats_GetLastError(nullptr)));
+        eprintf("Failed to add stream (stream_name=%s stream_subject=%s): %s", stream_name.c_str(),
+                stream_subject.c_str(), nats_GetLastError(nullptr));
         jsCtx_Destroy(js);
         js = nullptr;
-        natsConnection_Destroy(conn);
-        conn = nullptr;
         return false;
     }
 
@@ -334,29 +376,38 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     jsErrCode jerr;
 
     if ( ! Connect() ) {
-        if ( dropped_writes_log > 0 && writer_stats.dropped_writes % dropped_writes_log == 0 )
-            Error(
-                Fmt("Dropped writes [pid=%d dropped_writes=%" PRIu64 "]\n", getpid(), writer_stats.dropped_writes + 1));
+        DropWrite(NATS_NOT_YET_CONNECTED, "not yet connected in DoWrite()");
+        return true;
+    }
 
-        writer_stats.dropped_writes++;
+    if ( MayStall() ) {
+        DropWrite(NATS_ERR, "may stall");
         return true;
     }
 
     desc.Clear();
-    if ( ! formatter->Describe(&desc, num_fields, fields, vals) )
-        return false;
+    if ( ! formatter->Describe(&desc, num_fields, fields, vals) ) {
+        DropWrite(NATS_ERR, "formatter describe failed");
+        return true;
+    }
 
     const char* data = (const char*)desc.Bytes();
     int data_len = desc.Size();
 
     natsMsg* msg;
     if ( s = natsMsg_Create(&msg, publish_subject.c_str(), nullptr /*reply*/, data, data_len); s != NATS_OK ) {
-        Error(Fmt("NATS: Failed Create message: %s", nats_GetLastError(nullptr)));
-        return false;
+        DropWrite(s, "failed to create message");
+        return true;
     }
 
-    if ( s = js_PublishMsgAsync(js, &msg, NULL); s != NATS_OK )
-        PublishError(s, nats_GetLastError(nullptr));
+    jsPubOptions opts;
+    jsPubOptions_Init(&opts);
+    opts.MaxWait = publish_async_max_wait_ms;
+
+    if ( s = js_PublishMsgAsync(js, &msg, &opts); s != NATS_OK )
+        PublishError(s, /*js_err=*/0, nats_GetLastError(nullptr));
+    else
+        IncrementPending();
 
     natsMsg_Destroy(msg);
 
@@ -376,18 +427,45 @@ bool NATSWriter::DoFlush(double network_time) {
 
 bool NATSWriter::DoFinish(double network_time) {
     debug("DoFinish");
+
+    if ( ! js ) {
+        conn = nullptr; // make sure the connection is released.
+        return true;
+    }
+
     natsStatus s = NATS_OK;
     jsPubOptions completeOpts;
     jsPubOptions_Init(&completeOpts);
     completeOpts.MaxWait = publish_async_complete_max_wait_ms;
 
-    if ( s = js_PublishAsyncComplete(js, &completeOpts); s != NATS_OK )
-        Warning(Fmt("DoFinish: PublishAsyncComplete failed: %s", nats_GetLastError(nullptr)));
+    if ( s = js_PublishAsyncComplete(js, &completeOpts); s != NATS_OK ) {
+        eprintf("%s: DoFinish: PublishAsyncComplete failed: %s", Info().path, nats_GetLastError(nullptr));
+
+        // Try to get the pending messages. Solely for reporting any
+        // information we can figure out or if it'll fail.
+        natsMsgList pending;
+        if ( s = js_PublishAsyncGetPendingList(&pending, js); s == NATS_OK ) {
+            eprintf("%s: DoFinish: Had %d pending messages", Info().path, pending.Count);
+            writer_stats.dropped_writes += pending.Count;
+
+            natsMsgList_Destroy(&pending);
+        }
+        else {
+            eprintf("%s: DoFinish: js_PublishAsyncGetPendingList() failed: %s", Info().path,
+                    nats_GetLastError(nullptr));
+        }
+    }
+
+    jsCtx_Destroy(js);
+    js = nullptr;
+
+    debug("JetStream context destroyed!");
 
     return true;
 }
 
 bool NATSWriter::DoHeartbeat(double network_time, double current_time) {
+    // NOTE: WriterBackend takes send_heartbeats as false, so this isn't running!
     debug("DoHeartbeat");
     return true;
 }

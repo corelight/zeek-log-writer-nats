@@ -1,0 +1,36 @@
+# @TEST-REQUIRES: have-nats
+# @TEST-EXEC: nats-cleanup
+# @TEST-EXEC: zeek -r $TRACES/dns-http-https.pcap %INPUT
+# @TEST-EXEC: for s in conn dns http ssl ; do echo ${s}; nats subscribe test-sensor.logs.${s} -r --all --wait=$SUBSCRIBE_WAIT ; done >> sensor-logs.jsonl
+# @TEST-EXEC: btest-diff sensor-logs.jsonl
+
+@if ( Version::number >= 70100 )
+@load policy/protocols/conn/disable-unknown-ip-proto-support
+@endif
+
+@if ( Version::number >= 80100 )
+@load policy/protocols/dns/disable-opcode-log-fields
+@endif
+
+redef Log::default_writer=Log::WRITER_NATS;
+
+redef LogNATS::stream_name_template = "test-sensor-logs-{path}";
+redef LogNATS::publish_subject_template = "test-sensor.logs.{path}";
+redef LogNATS::stream_subject_template = "test-sensor.logs.{path}";
+
+# Re-use the same connection per URL.
+redef LogNATS::connection_sharing_policy = LogNATS::CONNECTION_SHARED;
+
+event zeek_init()
+	{
+	Log::disable_stream(PacketFilter::LOG);
+
+	local f = copy(Log::get_filter(Conn::LOG, "default"));
+	Log::remove_filter(Conn::LOG, "default");
+
+	# Use an exclusive connection for conn.log
+	f$config = table(
+		["connection_sharing_policy"] = cat(LogNATS::CONNECTION_EXCLUSIVE),
+	);
+	Log::add_filter(Conn::LOG, f);
+	}
