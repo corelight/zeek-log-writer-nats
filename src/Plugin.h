@@ -9,11 +9,6 @@ protected:
     zeek::plugin::Configuration Configure() override;
     void InitPostScript() override;
     void Done() override;
-
-    void InstallTrampolines();
-
-private:
-    void* unused = nullptr;
 };
 
 extern Plugin plugin;

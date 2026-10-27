@@ -1,6 +1,3 @@
-// Inspiration from the Python version, but totally hacked together.
-//
-// https://github.com/python/cpython/pull/96123/files
 #include "Plugin.h"
 
 #include <sys/mman.h>
@@ -12,7 +9,6 @@
 #include <zeek/Traverse.h>
 #include <zeek/util.h>
 #include <cstdlib>
-#include <memory>
 
 #include "NATS.h"
 #include "NATSCoreWriter.h"
