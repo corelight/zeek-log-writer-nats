@@ -66,6 +66,11 @@ protected:
     bool DoFinish(double network_time) override;
     bool DoHeartbeat(double network_time, double current_time) override;
 
+    /**
+     * Format vals as JSON and fill the msg out pointer with a new natsMsg instance.
+     */
+    bool FormatMessage(natsMsg** msg, int num_fields, const threading::Field* const* fields, threading::Value** vals);
+
     // Try connect and setup the stream.
     bool Connect();
 

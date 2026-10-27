@@ -53,22 +53,9 @@ bool NATSFastPublishWriter::DoWrite(int num_fields, const threading::Field* cons
         }
     }
 
-
-    // TODO: Factor out!
-    auto& desc = Desc();
-    desc.Clear();
-
-    if ( ! Formatter().Describe(&desc, num_fields, fields, vals) ) {
-        DropWrite(NATS_ERR, "formatter describe failed");
-        return true;
-    }
-
-    const char* data = (const char*)desc.Bytes();
-    int data_len = desc.Size();
-
     natsMsg* msg;
-    if ( s = natsMsg_Create(&msg, PublishSubject().c_str(), nullptr /*reply*/, data, data_len); s != NATS_OK ) {
-        PublishError(s, 0, "failed to create message");
+    if ( ! FormatMessage(&msg, num_fields, fields, vals) ) {
+        DropWrite(NATS_ERR, "FormatMessage() failed");
         return true;
     }
 
