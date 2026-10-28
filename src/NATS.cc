@@ -406,10 +406,14 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     return true;
 }
 
+bool NATSWriter::Format(ODesc& out, int num_fields, const threading::Field* const* fields, threading::Value** vals) {
+    desc.Clear();
+    return formatter->Describe(&out, num_fields, fields, vals);
+}
+
 bool NATSWriter::FormatMessage(natsMsg** msg, int num_fields, const threading::Field* const* fields,
                                threading::Value** vals) {
-    desc.Clear();
-    if ( ! formatter->Describe(&desc, num_fields, fields, vals) )
+    if ( ! Format(desc, num_fields, fields, vals) )
         return false;
 
     const char* data = reinterpret_cast<const char*>(desc.Bytes());
