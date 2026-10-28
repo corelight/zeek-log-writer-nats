@@ -29,10 +29,12 @@ struct NATSWriterStats {
 
 class NATSWriter : public WriterBackend {
 public:
-    explicit NATSWriter(WriterFrontend* frontend);
+    explicit NATSWriter(WriterFrontend* frontend, bool send_heartbeats);
     ~NATSWriter() override;
 
-    static WriterBackend* Instantiate(WriterFrontend* frontend) { return new NATSWriter(frontend); }
+    static WriterBackend* Instantiate(WriterFrontend* frontend) {
+        return new NATSWriter(frontend, /*send_heartbeats=*/false);
+    }
 
     // Callback for message acknowledgements.
     void PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate);
@@ -63,6 +65,16 @@ protected:
     bool DoFlush(double network_time) override;
     bool DoFinish(double network_time) override;
     bool DoHeartbeat(double network_time, double current_time) override;
+
+    /**
+     * Format vals as JSON into ODesc out, which is cleared first.
+     */
+    bool Format(zeek::ODesc& out, int num_fields, const threading::Field* const* fields, threading::Value** vals);
+
+    /**
+     * Similar to Format(), but creates a new natsMsg.
+     */
+    bool FormatMessage(natsMsg** out, int num_fields, const threading::Field* const* fields, threading::Value** vals);
 
     // Try connect and setup the stream.
     bool Connect();

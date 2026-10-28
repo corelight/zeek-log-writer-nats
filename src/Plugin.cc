@@ -12,6 +12,7 @@
 
 #include "NATS.h"
 #include "NATSCoreWriter.h"
+#include "NATSFastPublishWriter.h"
 #include "config.h"
 
 namespace zeek::plugin::Zeek_Log_Writer_NATS {
@@ -20,9 +21,28 @@ Plugin plugin;
 
 using namespace zeek::plugin::Zeek_Log_Writer_NATS;
 
+namespace {
+using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
+
+WriterBackend* Instantitate(WriterFrontend* frontend) {
+    auto publish_mode = zeek::obj_desc_short(zeek::id::find_val("LogNATS::publish_mode").get());
+
+    debug("publish_mode=%s", publish_mode.c_str());
+
+    if ( publish_mode == "LogNATS::PUBLISH_MODE_CORE" )
+        return NATSCoreWriter::Instantiate(frontend);
+    else if ( publish_mode == "LogNATS::PUBLISH_MODE_ASYNC" )
+        return NATSWriter::Instantiate(frontend);
+    else if ( publish_mode == "LogNATS::PUBLISH_MODE_FAST" )
+        return NATSFastPublishWriter::Instantiate(frontend);
+
+    eprintf("Unknown publish_mode=%s", publish_mode.c_str());
+    return nullptr;
+}
+} // namespace
+
 zeek::plugin::Configuration Plugin::Configure() {
-    AddComponent(new zeek::logging::Component("NATS", detail::NATSWriter::Instantiate));
-    AddComponent(new zeek::logging::Component("NATS_CORE", detail::NATSCoreWriter::Instantiate));
+    AddComponent(new zeek::logging::Component("NATS", Instantitate));
 
     zeek::plugin::Configuration config;
     config.name = "Zeek::Log_Writer_NATS";

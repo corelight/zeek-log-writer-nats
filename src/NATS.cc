@@ -15,7 +15,7 @@
 using namespace zeek::logging;
 using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
 
-NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*send_heartbeats=*/false) {
+NATSWriter::NATSWriter(WriterFrontend* frontend, bool send_heartbeats) : WriterBackend(frontend, send_heartbeats) {
     // Initialize the NATS metrics with callbacks that use
     // the embedded WriterStats in in a NATSWriter instance.
     std::vector<telemetry::LabelView> labels = {{"filter-name", frontend->GetFilterName()},
@@ -191,7 +191,6 @@ void NATSWriter::DropWrite(natsStatus err, const char* text) {
 
 bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) {
     debug("DoInit %s", info.path);
-    natsStatus s = NATS_OK;
 
     for ( const auto& [name, value] : info.config ) {
         if ( zeek::util::streq(name, "url") ) {
@@ -373,7 +372,6 @@ bool NATSWriter::Connect() {
 
 bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) {
     natsStatus s = NATS_OK;
-    jsErrCode jerr;
 
     if ( ! Connect() ) {
         DropWrite(NATS_NOT_YET_CONNECTED, "not yet connected in DoWrite()");
@@ -385,18 +383,10 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
         return true;
     }
 
-    desc.Clear();
-    if ( ! formatter->Describe(&desc, num_fields, fields, vals) ) {
-        DropWrite(NATS_ERR, "formatter describe failed");
-        return true;
-    }
+    natsMsg* msg = nullptr;
 
-    const char* data = (const char*)desc.Bytes();
-    int data_len = desc.Size();
-
-    natsMsg* msg;
-    if ( s = natsMsg_Create(&msg, publish_subject.c_str(), nullptr /*reply*/, data, data_len); s != NATS_OK ) {
-        DropWrite(s, "failed to create message");
+    if ( ! FormatMessage(&msg, num_fields, fields, vals) ) {
+        DropWrite(NATS_ERR, "FormatMessage() failed");
         return true;
     }
 
@@ -412,6 +402,23 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     natsMsg_Destroy(msg);
 
     return true;
+}
+
+bool NATSWriter::Format(ODesc& out, int num_fields, const threading::Field* const* fields, threading::Value** vals) {
+    desc.Clear();
+    return formatter->Describe(&out, num_fields, fields, vals);
+}
+
+bool NATSWriter::FormatMessage(natsMsg** msg, int num_fields, const threading::Field* const* fields,
+                               threading::Value** vals) {
+    if ( ! Format(desc, num_fields, fields, vals) )
+        return false;
+
+    const char* data = reinterpret_cast<const char*>(desc.Bytes());
+    int data_len = desc.Size();
+
+    natsStatus s = natsMsg_Create(msg, PublishSubject().c_str(), /*reply=*/nullptr, data, data_len);
+    return s == NATS_OK;
 }
 
 bool NATSWriter::DoRotate(const char* rotated_path, double open, double close, bool terminating) {

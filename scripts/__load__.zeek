@@ -23,6 +23,17 @@ export {
 		CONNECTION_SHARED,
 	};
 
+	type PublishMode: enum {
+		# High-throughput fire-and-forget mode until the connection's
+		# buffer is full without acks.
+		PUBLISH_MODE_CORE,
+		# js_PublishAsyncMsg() style including ack processing. Heavy.
+		PUBLISH_MODE_ASYNC,
+		# Fast-ingest batch publish.
+		# https://docs.nats.io/learn/jetstream/advanced-publishing#fast-ingest-batch-publish
+		PUBLISH_MODE_FAST,
+	};
+
 	global url: string = "nats://localhost:4222" &redef;
 
 	# Default connection_sharing_policy.
@@ -35,6 +46,9 @@ export {
 	# The policy may be set on a per log writer via the connection_sharing_policy
 	# entry in the writer's config table.
 	global connection_sharing_policy = CONNECTION_EXCLUSIVE &redef;
+
+	# Globally selected publish_mode for all log writers.
+	global publish_mode = PUBLISH_MODE_ASYNC &redef;
 
 	# The connection timeout configured via libnats.
 	global connection_timeout = 1000msec &redef;
@@ -114,4 +128,24 @@ export {
 
 	# Amount of time to wait for async publish at shutdown.
 	global publish_async_complete_max_wait: interval = 1000msec &redef;
+
+	type FastPublishBatchPolicy: enum {
+		# Each logging thread receives its own batch.
+		BATCH_EXCLUSIVE,
+		# A single batch is shared across all logging threads.
+		BATCH_SHARED,
+
+		# Some ideas
+		# BATCH_SUBJECT,
+		# BATCH_STREAM,
+		# BATCH_RR,  round-robin with a fixed number of batches?
+	};
+
+	global fast_publish_batch_policy = BATCH_EXCLUSIVE &redef;
+
+	# Options when using Log::WRITER_NATS_FAST
+	global fast_publish_flow = 100 &redef;
+	global fast_publish_max_batch_size = 1000 &redef;
+	global fast_publish_max_outstanding_acks = 16 &redef;
+	global fast_publish_commit_timeout = 5sec &redef;
 }

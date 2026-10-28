@@ -1,0 +1,6 @@
+[submodule "3rdparty/orbit.c"]
+	path = 3rdparty/orbit.c
+	url = git@github.com:synadia-io/orbit.c.git
+[submodule "3rdparty/nats.c"]
+	path = 3rdparty/nats.c
+	url = git@github.com:nats-io/nats.c.git
