@@ -20,7 +20,31 @@ else ()
     set(NATS_LIBRARIES cnats::nats)
 endif ()
 
-add_subdirectory(./3rdparty/orbit.c EXCLUDE_FROM_ALL)
+# Build orbit.c from a patched copy in the build directory, keeping the
+# submodule clean. Patches already applied to the copy are skipped.
+find_program(PATCH_EXECUTABLE patch REQUIRED)
+set(ORBIT_SOURCE_DIR ${CMAKE_CURRENT_BINARY_DIR}/3rdparty/orbit.c)
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/orbit.c
+     DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/3rdparty PATTERN .git EXCLUDE)
+file(GLOB ORBIT_PATCHES ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/patches/orbit.c/*.patch)
+list(SORT ORBIT_PATCHES)
+foreach (patch_file ${ORBIT_PATCHES})
+    execute_process(
+        COMMAND ${PATCH_EXECUTABLE} -p1 -R -s -f --dry-run -i ${patch_file}
+        WORKING_DIRECTORY ${ORBIT_SOURCE_DIR}
+        RESULT_VARIABLE patch_applied
+        OUTPUT_QUIET ERROR_QUIET)
+    if (NOT patch_applied EQUAL 0)
+        message(STATUS "Applying ${patch_file}")
+        execute_process(COMMAND ${PATCH_EXECUTABLE} -p1 -N -s -i ${patch_file}
+                        WORKING_DIRECTORY ${ORBIT_SOURCE_DIR} RESULT_VARIABLE patch_result)
+        if (NOT patch_result EQUAL 0)
+            message(FATAL_ERROR "Failed to apply ${patch_file}")
+        endif ()
+    endif ()
+endforeach ()
+
+add_subdirectory(${ORBIT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/orbit.c-build EXCLUDE_FROM_ALL)
 
 # Establish version numbers in config.h
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" VERSION LIMIT_COUNT 1)
