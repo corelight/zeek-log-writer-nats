@@ -1,20 +1,11 @@
 #pragma once
 
-#include <fast_publish.h>
-
+#include "Connection.h"
 #include "NATS.h"
 
 using namespace zeek::logging;
 
 namespace zeek::plugin::Zeek_Log_Writer_NATS::detail {
-
-/**
- * How batching should be done.
- */
-enum class FastPublishBatchPolicy : uint8_t {
-    BatchPerLogWriter,
-    BatchPerProcess,
-};
 
 /**
  * A log writer using the orbit.c jetstream-extra fast_publish.h
@@ -23,9 +14,6 @@ enum class FastPublishBatchPolicy : uint8_t {
 class NATSFastPublishWriter : public NATSWriter {
 public:
     explicit NATSFastPublishWriter(WriterFrontend* frontend);
-
-    // Callback
-    void ErrorHandler(natsStatus status, const char* description);
 
     static WriterBackend* Instantiate(WriterFrontend* frontend) { return new NATSFastPublishWriter(frontend); }
 
@@ -37,19 +25,9 @@ protected:
     bool DoFinish(double network_time) override;
 
 private:
-    // Helper to commit a batch on heartbeat and at shutdown.
-    bool CommitBatch();
-
-    jsFastPublishCtx* fp_ctx = nullptr;
-
-    size_t batch_size = 0;
-    size_t max_batch_size;
-    uint16_t flow;
-    uint16_t max_outstanding_acks;
-    int64_t commit_timeout_ms;
     FastPublishBatchPolicy batch_policy;
-
-    bool continue_on_gap = true;
+    FastPublisherPtr fast_publisher;
+    FastPublisherOptions opts;
 };
 
 } // namespace zeek::plugin::Zeek_Log_Writer_NATS::detail
