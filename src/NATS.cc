@@ -191,7 +191,6 @@ void NATSWriter::DropWrite(natsStatus err, const char* text) {
 
 bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) {
     debug("DoInit %s", info.path);
-    natsStatus s = NATS_OK;
 
     for ( const auto& [name, value] : info.config ) {
         if ( zeek::util::streq(name, "url") ) {
@@ -373,7 +372,6 @@ bool NATSWriter::Connect() {
 
 bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) {
     natsStatus s = NATS_OK;
-    jsErrCode jerr;
 
     if ( ! Connect() ) {
         DropWrite(NATS_NOT_YET_CONNECTED, "not yet connected in DoWrite()");

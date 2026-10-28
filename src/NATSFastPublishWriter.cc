@@ -55,8 +55,6 @@ NATSFastPublishWriter::NATSFastPublishWriter(WriterFrontend* frontend)
 
 
 bool NATSFastPublishWriter::DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) {
-    natsStatus s = NATS_OK;
-
     if ( Conn()->Epoch() == 0 ) {
         // XXX: Can we do better than dropping everything
         // before being connected for the first time?
