@@ -72,7 +72,7 @@ protected:
     bool Format(zeek::ODesc& out, int num_fields, const threading::Field* const* fields, threading::Value** vals);
 
     /**
-     * Similar to Format(, but creates a new natsMsg.
+     * Similar to Format(), but creates a new natsMsg.
      */
     bool FormatMessage(natsMsg** out, int num_fields, const threading::Field* const* fields, threading::Value** vals);
 
