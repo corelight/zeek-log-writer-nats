@@ -445,6 +445,9 @@ FastPublisher::~FastPublisher() {
 Result FastPublisher::DoAddMsg(natsMsg* msg, const char* subject, const void* data, int data_len) {
     natsStatus s = NATS_OK;
 
+    // Update idle timestamp
+    idle_ts = nats_Now();
+
     if ( ! fp_ctx ) {
         // debug("AddMsg(): Creating new batch!\n");
         jsFastPublisherOptions fp_opts;

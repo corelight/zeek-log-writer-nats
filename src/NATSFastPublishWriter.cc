@@ -83,10 +83,12 @@ bool NATSFastPublishWriter::DoWrite(int num_fields, const threading::Field* cons
 
 
 bool NATSFastPublishWriter::DoHeartbeat(double network_time, double current_time) {
-    debug("DoHeartbeat");
-
-    if ( fast_publisher )
-        fast_publisher->Commit();
+    if ( fast_publisher ) {
+        debug("%s: DoHeartbeat batch_size=%zu idle=%d", Info().path, fast_publisher->BatchSize(),
+              fast_publisher->IsIdle());
+        if ( fast_publisher->IsIdle() )
+            fast_publisher->Commit();
+    }
 
     return true;
 }

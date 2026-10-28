@@ -58,6 +58,7 @@ struct FastPublisherOptions {
     uint16_t flow;
     uint16_t max_outstanding_acks;
     int64_t commit_timeout_ms;
+    int64_t idle_timeout_ms = 1000;
     bool continue_on_gap = true;
 };
 
@@ -220,6 +221,16 @@ public:
      */
     virtual Result Commit();
 
+    bool IsIdle() const {
+        // Meh, not sure this is great.
+        return (nats_Now() - idle_ts) > opts.idle_timeout_ms;
+    }
+
+    /**
+     * @return The current batch_size. May be pretty large for unlimited batches.
+     */
+    size_t BatchSize() const { return batch_size; }
+
     /**
      * Error Callbacks.
      */
@@ -232,8 +243,9 @@ protected:
     FastPublisherOptions opts;
     jsFastPublishCtx* fp_ctx = nullptr;
 
-    // Need more tracking? Maybe something like an idle timestamp?
-    size_t batch_size = 0;
+    // Make those atomic so that reading isn't upsetting TSAN.
+    std::atomic<size_t> batch_size = 0;
+    std::atomic<int64_t> idle_ts = 0;
 };
 
 /**
