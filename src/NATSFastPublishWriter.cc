@@ -68,16 +68,17 @@ bool NATSFastPublishWriter::DoWrite(int num_fields, const threading::Field* cons
         fast_publisher = Conn()->CreateFastPublisher(batch_policy, opts);
 
 
-    natsMsg* msg;
-    if ( ! FormatMessage(&msg, num_fields, fields, vals) ) {
+    if ( ! Format(Desc(), num_fields, fields, vals) ) {
         DropWrite(NATS_ERR, "FormatMessage() failed");
         return true;
     }
 
-    if ( auto [ok, status, error] = fast_publisher->AddMsg(msg); ! ok )
+    const char* subject = PublishSubject().c_str();
+
+    if ( auto [ok, status, error] = fast_publisher->AddMsg(subject, Desc().Bytes(), static_cast<int>(Desc().Size()));
+         ! ok )
         DropWrite(status, error->c_str());
 
-    natsMsg_Destroy(msg);
     return true;
 }
 
