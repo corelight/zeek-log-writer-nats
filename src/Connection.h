@@ -1,5 +1,6 @@
 #pragma once
 
+#include <fast_publish.h>
 #include <nats/nats.h>
 #include <nats/status.h>
 #include <atomic>
@@ -27,6 +28,15 @@ enum class ConnectionSharingPolicy {
 };
 
 /**
+ * How batching should be done.
+ */
+enum class FastPublishBatchPolicy : uint8_t {
+    EXCLUSIVE,
+    SHARED,
+};
+
+
+/**
  * Options for a connection.
  */
 struct ConnectionOptions {
@@ -40,7 +50,21 @@ struct ConnectionOptions {
 };
 
 
+/**
+ * Options for a fast ingest publisher.
+ */
+struct FastPublisherOptions {
+    size_t max_batch_size;
+    uint16_t flow;
+    uint16_t max_outstanding_acks;
+    int64_t commit_timeout_ms;
+    bool continue_on_gap = true;
+};
+
+
 class Connection;
+class FastPublisher;
+using FastPublisherPtr = std::shared_ptr<FastPublisher>;
 
 /**
  * This is used as the closure for the connection callbacks.
@@ -62,7 +86,7 @@ struct CallbackState {
  * SharedConnection. The latter allows multiple threads to re-use the
  * same connection to a NATS server.
  */
-class Connection {
+class Connection : public std::enable_shared_from_this<Connection> {
 public:
     Connection(ConnectionOptions opts);
     virtual ~Connection();
@@ -119,6 +143,9 @@ public:
      */
     natsConnection* RawConnection() { return natsConn; }
 
+
+    FastPublisherPtr CreateFastPublisher(FastPublishBatchPolicy policy, FastPublisherOptions opts);
+
     /**
      * Helper tuple returned from Create()
      */
@@ -151,6 +178,73 @@ private:
     std::atomic<uint64_t> epoch{0};
     static std::mutex connections_mtx;
     static std::map<std::string, std::weak_ptr<Connection>> connections;
+
+    FastPublisherPtr shared_publisher;
 };
 
+/**
+ * A fast publish batch that commits when full.
+ */
+class FastPublisher {
+public:
+    FastPublisher(std::shared_ptr<Connection> conn, FastPublisherOptions opts);
+    virtual ~FastPublisher();
+
+    // TODO: Check this is the common pattern.
+    FastPublisher(const FastPublisher& o) = delete;
+    FastPublisher(FastPublisher&& o) = delete;
+    FastPublisher operator=(FastPublisher& o) = delete;
+    FastPublisher operator=(FastPublisher&& o) = delete;
+
+    /**
+     * Creates a new batch if needed, may be blocking, may commit.
+     */
+    virtual Result AddMsg(natsMsg* msg);
+
+    /**
+     * Commit the batch even if it's not full.
+     */
+    virtual Result Commit();
+
+    /**
+     * Error Callbacks.
+     */
+    void ErrorHandler(natsStatus status, const char* description);
+
+protected:
+    std::shared_ptr<Connection> conn;
+    FastPublisherOptions opts;
+    jsFastPublishCtx* fp_ctx = nullptr;
+
+    // Need more tracking? Maybe something like an idle timestamp?
+    size_t batch_size = 0;
+};
+
+/**
+ * The shared fast publisher will have all threads calling AddMsg() in fast
+ * succession and lock. It'll probably suck though it should be fast compared
+ * to the underlying IO and stalling,.
+ * We can also extend to a locked AddMsgs(std::span<natsMsg*> msgs)
+ * if we're okay patching upstream Zeek (I think we should, it makes sense).
+ *
+ * TODO: Find a way to report metrics back. Maybe AddMsg() could take
+ *       a pointer to WriterStats similar to #25?
+ */
+class SharedFastPublisher : public FastPublisher {
+public:
+    SharedFastPublisher(std::shared_ptr<Connection> conn, FastPublisherOptions opts);
+
+    Result AddMsg(natsMsg* msg) override {
+        std::scoped_lock lock{mtx};
+        return FastPublisher::AddMsg(msg);
+    }
+
+    Result Commit() override {
+        std::scoped_lock lock{mtx};
+        return FastPublisher::Commit();
+    }
+
+private:
+    std::mutex mtx;
+};
 } // namespace zeek::plugin::Zeek_Log_Writer_NATS::detail
