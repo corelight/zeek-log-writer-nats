@@ -442,7 +442,7 @@ FastPublisher::~FastPublisher() {
 }
 
 
-Result FastPublisher::AddMsg(natsMsg* msg) {
+Result FastPublisher::DoAddMsg(natsMsg* msg, const char* subject, const void* data, int data_len) {
     natsStatus s = NATS_OK;
 
     if ( ! fp_ctx ) {
@@ -468,28 +468,37 @@ Result FastPublisher::AddMsg(natsMsg* msg) {
         }
     }
 
-    // How much more room in the batch before we commit?
-    const size_t left = opts.max_batch_size - batch_size;
+    // How much more room in the batch before we commit? Zero means
+    const size_t left = opts.max_batch_size == 0 ? 0 : opts.max_batch_size - batch_size;
 
     // Do we need BatchMsgOpts
     // jsBatchMsgOpts opts;
     // jsBatchMsgOpts_Init()
 
-    if ( left > 1 ) {
-        if ( s = jsFastPublish_AddMsg(/*ack=*/nullptr, fp_ctx, msg, /*opts=*/nullptr); s != NATS_OK ) {
+    // left == 0: unlimited, left > 1: still room.
+    if ( left == 0 || left > 1 ) {
+        if ( msg )
+            s = jsFastPublish_AddMsg(/*ack=*/nullptr, fp_ctx, msg, /*opts=*/nullptr);
+        else
+            s = jsFastPublish_Add(/*ack=*/nullptr, fp_ctx, subject, data, data_len, /*opts=*/nullptr);
+
+        if ( s != NATS_OK )
             return Error(s, "AddMsg failed");
-            // PublishError(s, 0, "jsFastPublish_AddMsg() failed");
-            // natsMsg_Destroy(msg);
-        }
 
         ++batch_size;
     }
     else if ( left == 1 ) {
+        // max_batch_size reached
         jsPubAck* pub_ack = nullptr;
         // debug("AddMsg: Batch full, commit!\n");
 
-        if ( s = jsFastPublish_CommitMsg(&pub_ack, fp_ctx, msg, /*opts=*/nullptr, opts.commit_timeout_ms);
-             s != NATS_OK ) {
+        if ( msg )
+            s = jsFastPublish_CommitMsg(&pub_ack, fp_ctx, msg, /*opts=*/nullptr, opts.commit_timeout_ms);
+        else
+            s = jsFastPublish_Commit(&pub_ack, fp_ctx, subject, data, data_len, /*opts=*/nullptr,
+                                     opts.commit_timeout_ms);
+
+        if ( s != NATS_OK ) {
             std::string error = nats_GetLastError(nullptr);
             eprintf("CommitMsg failed -- really bad: %s\n", error.c_str());
             // PublishError(s, 0, "jsFastPublish_CommitMsg() failed");

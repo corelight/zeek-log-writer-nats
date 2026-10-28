@@ -199,7 +199,21 @@ public:
     /**
      * Creates a new batch if needed, may be blocking, may commit.
      */
-    virtual Result AddMsg(natsMsg* msg);
+    Result AddMsg(natsMsg* msg) {
+        /*blub*/
+        return DoAddMsg(msg, /*subject=*/nullptr, /*data=*/nullptr, /*data_len=*/0);
+    }
+
+    /**
+     * Creates a new batch if needed, may be blocking, may commit.
+     *
+     * This can be faster than AddMsg() taking a natsMsg because
+     * it avoids an intermediate natsMsg creation. But it also means
+     * you cannot set any headers.
+     */
+    Result AddMsg(const char* subject, const void* data, int data_len) {
+        return DoAddMsg(/*msg=*/nullptr, subject, data, data_len);
+    }
 
     /**
      * Commit the batch even if it's not full.
@@ -212,6 +226,8 @@ public:
     void ErrorHandler(natsStatus status, const char* description);
 
 protected:
+    virtual Result DoAddMsg(natsMsg* msg, const char* subject, const void* data, int data_len);
+
     std::shared_ptr<Connection> conn;
     FastPublisherOptions opts;
     jsFastPublishCtx* fp_ctx = nullptr;
@@ -234,9 +250,9 @@ class SharedFastPublisher : public FastPublisher {
 public:
     SharedFastPublisher(std::shared_ptr<Connection> conn, FastPublisherOptions opts);
 
-    Result AddMsg(natsMsg* msg) override {
+    Result DoAddMsg(natsMsg* msg, const char* subject, const void* data, int data_len) override {
         std::scoped_lock lock{mtx};
-        return FastPublisher::AddMsg(msg);
+        return FastPublisher::DoAddMsg(msg, subject, data, data_len);
     }
 
     Result Commit() override {
