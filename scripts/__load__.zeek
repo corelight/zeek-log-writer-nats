@@ -32,6 +32,10 @@ export {
 		# Fast-ingest batch publish.
 		# https://docs.nats.io/learn/jetstream/advanced-publishing#fast-ingest-batch-publish
 		PUBLISH_MODE_FAST,
+		# Fast-ingest batch publish from a publisher thread, with one
+		# batch shared by all log writers of a connection that publish
+		# to the same stream.
+		PUBLISH_MODE_FAST_THREAD,
 	};
 
 	global url: string = "nats://localhost:4222" &redef;
@@ -129,6 +133,13 @@ export {
 	# has been exceeded. libnats does not provide a non-stalling
 	# mode, but generally we never want DoWrite() to block, so
 	# this defaults to T.
+	#
+	# With PUBLISH_MODE_FAST_THREAD, drop writes rather than block when
+	# the queue of the shared batch is full, see
+	# fast_publish_thread_stall_wait. If F, writers wait for space
+	# without limit: the server's backpressure then propagates into
+	# Zeek's log writer queues, which grow without bound under
+	# sustained overload.
 	global publish_async_no_stall = T &redef;
 
 	# Amount of time to wait for async publish at shutdown.
@@ -148,9 +159,71 @@ export {
 
 	global fast_publish_batch_policy = BATCH_EXCLUSIVE &redef;
 
-	# Options when using Log::WRITER_NATS_FAST
+	# Options when using PUBLISH_MODE_FAST or PUBLISH_MODE_FAST_THREAD.
+	#
+	# PUBLISH_MODE_FAST_THREAD always shares one batch per connection
+	# and stream and keeps it open until it's committed, so it ignores
+	# fast_publish_batch_policy and fast_publish_max_batch_size.
+
+	# The requested number of messages per flow acknowledgement. The
+	# server starts lower and may adjust the value at runtime, but
+	# never above this one.
+	#
+	# nats-server (2.14, 2.15) uses at most 500 messages per flow
+	# acknowledgement, divided by the number of batches publishing to
+	# the stream concurrently. With PUBLISH_MODE_FAST_THREAD, larger
+	# values are clamped to 500 with a warning.
 	global fast_publish_flow = 100 &redef;
 	global fast_publish_max_batch_size = 1000 &redef;
 	global fast_publish_max_outstanding_acks = 16 &redef;
+
+	# How long to wait for a commit. With PUBLISH_MODE_FAST_THREAD,
+	# also the maximum time the publisher thread waits for a flow
+	# acknowledgement. Hitting it ends the batch: messages in flight
+	# then are likely stored, but their outcome is unknown. The batch
+	# is committed to confirm what the server persisted, and the rest
+	# are counted as publish timeouts, not publish errors. The next
+	# message starts a new batch.
+	#
+	# Short server pauses, e.g. while a full stream deletes old blocks,
+	# can exceed one second. A batch that couldn't be committed lingers
+	# on the server until its batch timeout (10 seconds after its last
+	# message, see the server's jetstream limits max_batch_timeout),
+	# reducing the flow budget of the other batches of the stream
+	# meanwhile.
 	global fast_publish_commit_timeout = 5sec &redef;
+
+	# Commit a batch when no message has been published for this long.
+	# The server abandons batches after 10 seconds without traffic, so
+	# keep this below that. With PUBLISH_MODE_FAST_THREAD, set to 0sec
+	# to disable.
+	global fast_publish_idle_timeout = 1sec &redef;
+
+	# With PUBLISH_MODE_FAST_THREAD, each writer buffers this many
+	# formatted writes and queues them at once for the publisher thread
+	# of the shared batch, which publishes them in order. Buffered writes
+	# are also queued on flush and with every writer heartbeat
+	# (Threading::heartbeat_interval). A log flush (e.g. Log::flush())
+	# also commits the shared batch once everything queued so far is
+	# published, waiting up to fast_publish_commit_timeout.
+	#
+	# Outcomes are accounted to the writer that produced the message:
+	# acks, publish errors (definite failures such as lost messages or
+	# rejected batches), publish timeouts and dropped writes.
+	#
+	# Writers of different streams can't share a batch: the stream is
+	# identified by stream_name_template, so it must name the stream the
+	# writer actually publishes to, also when create_stream is F.
+	global fast_publish_thread_writer_batch: count = 64 &redef;
+
+	# With PUBLISH_MODE_FAST_THREAD, the maximum size in bytes of the
+	# messages queued for a shared batch's publisher thread. This bounds
+	# memory when the server can't keep up, see publish_async_no_stall.
+	global fast_publish_thread_queue_size: count = 64 * 1024 * 1024 &redef;
+
+	# With PUBLISH_MODE_FAST_THREAD and publish_async_no_stall, the
+	# maximum time a writer waits for queue space before dropping its
+	# buffered writes and counting them as dropped writes. This absorbs
+	# short bursts without blocking log writers for long.
+	global fast_publish_thread_stall_wait: interval = 50msec &redef;
 }

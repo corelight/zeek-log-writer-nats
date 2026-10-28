@@ -66,6 +66,8 @@ zeek_plugin_cc(src/Connection.cc)
 zeek_plugin_cc(src/NATS.cc)
 zeek_plugin_cc(src/NATSCoreWriter.cc)
 zeek_plugin_cc(src/NATSFastPublishWriter.cc)
+zeek_plugin_cc(src/NATSFastThreadWriter.cc)
+zeek_plugin_cc(src/FastBatch.cc)
 zeek_plugin_link_library(${NATS_LIBRARIES})
 
 zeek_get_plugin_target(plugin_target Zeek Log_Writer_NATS)
