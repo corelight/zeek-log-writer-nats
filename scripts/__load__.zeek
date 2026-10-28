@@ -129,6 +129,20 @@ export {
 	# Amount of time to wait for async publish at shutdown.
 	global publish_async_complete_max_wait: interval = 1000msec &redef;
 
+	type FastPublishBatchPolicy: enum {
+		# Each logging thread receives its own batch.
+		BATCH_EXCLUSIVE,
+		# A single batch is shared across all logging threads.
+		BATCH_SHARED,
+
+		# Some ideas
+		# BATCH_SUBJECT,
+		# BATCH_STREAM,
+		# BATCH_RR,  round-robin with a fixed number of batches?
+	};
+
+	global fast_publish_batch_policy = BATCH_EXCLUSIVE &redef;
+
 	# Options when using Log::WRITER_NATS_FAST
 	global fast_publish_flow = 100 &redef;
 	global fast_publish_max_batch_size = 1000 &redef;

@@ -36,9 +36,21 @@ NATSFastPublishWriter::NATSFastPublishWriter(WriterFrontend* frontend)
     commit_timeout_ms =
         static_cast<int64_t>(zeek::id::find_val("LogNATS::fast_publish_commit_timeout")->AsInterval() * 1000);
 
-    debug("fast_publish: path=%s flow=%" PRIu16 " max_batch_size=%zu max_outstanding_acks=%" PRIu16
+    auto batch_policy_str = zeek::obj_desc_short(zeek::id::find_val("LogNATS::fast_publish_batch_policy").get());
+
+    if ( batch_policy_str == "LogNATS::BATCH_PER_LOG_WRITER" )
+        batch_policy = FastPublishBatchPolicy::BatchPerLogWriter;
+    else if ( batch_policy_str == "LogNATS::BATCH_PER_PROCESS" )
+        batch_policy = FastPublishBatchPolicy::BatchPerProcess;
+    else {
+        eprintf("Invalid fast_publish_batch_policy: %s", batch_policy_str.c_str());
+        abort(); // :-/
+    }
+
+
+    debug("fast_publish: path=%s batch_policy=%s flow=%" PRIu16 " max_batch_size=%zu max_outstanding_acks=%" PRIu16
           " commit_timeout_ms=%" PRId64,
-          Info().path, flow, max_batch_size, max_outstanding_acks, commit_timeout_ms);
+          Info().path, batch_policy_str.c_str(), flow, max_batch_size, max_outstanding_acks, commit_timeout_ms);
 }
 
 namespace {

@@ -9,6 +9,14 @@ using namespace zeek::logging;
 namespace zeek::plugin::Zeek_Log_Writer_NATS::detail {
 
 /**
+ * How batching should be done.
+ */
+enum class FastPublishBatchPolicy : uint8_t {
+    BatchPerLogWriter,
+    BatchPerProcess,
+};
+
+/**
  * A log writer using the orbit.c jetstream-extra fast_publish.h
  * functionality to do fast batched publishing to NATS>
  */
@@ -39,6 +47,7 @@ private:
     uint16_t flow;
     uint16_t max_outstanding_acks;
     int64_t commit_timeout_ms;
+    FastPublishBatchPolicy batch_policy;
 
     bool continue_on_gap = true;
 };
