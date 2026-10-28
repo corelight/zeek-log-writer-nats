@@ -23,6 +23,17 @@ export {
 		CONNECTION_SHARED,
 	};
 
+	type PublishMode: enum {
+		# High-throughput fire-and-forget mode until the connection's
+		# buffer is full without acks.
+		PUBLISH_MODE_CORE,
+		# js_PublishAsyncMsg() style including ack processing. Heavy.
+		PUBLISH_MODE_ASYNC,
+		# Fast-ingest batch publish.
+		# https://docs.nats.io/learn/jetstream/advanced-publishing#fast-ingest-batch-publish
+		PUBLISH_MODE_FAST,
+	};
+
 	global url: string = "nats://localhost:4222" &redef;
 
 	# Default connection_sharing_policy.
@@ -35,6 +46,9 @@ export {
 	# The policy may be set on a per log writer via the connection_sharing_policy
 	# entry in the writer's config table.
 	global connection_sharing_policy = CONNECTION_EXCLUSIVE &redef;
+
+	# Globally selected publish_mode for all log writers.
+	global publish_mode = PUBLISH_MODE_ASYNC &redef;
 
 	# The connection timeout configured via libnats.
 	global connection_timeout = 1000msec &redef;
