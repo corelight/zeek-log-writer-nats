@@ -1,0 +1,68 @@
+diff --git a/jetstream-extra/src/fast_publish.c b/jetstream-extra/src/fast_publish.c
+index b965803..80e1bc2 100644
+--- a/jetstream-extra/src/fast_publish.c
++++ b/jetstream-extra/src/fast_publish.c
+@@ -68,6 +68,9 @@ struct __jsFastPublishCtx
+     char             *replyPrefix;
+     char             replySubj[256];
+     natsSubscription *ackSub;
++    // Set by the subscription's on-complete callback once _onAck can no
++    // longer run; jsFastPublish_Destroy waits for it before freeing ctx.
++    bool             ackSubDone;
+ 
+     uint64_t sequence;
+     uint64_t ackSequence;
+@@ -84,6 +87,17 @@ struct __jsFastPublishCtx
+ 
+ // ----- internal helpers ------------------------------------------------------
+ 
++static void
++_onAckSubComplete(void *closure)
++{
++    jsFastPublishCtx *ctx = (jsFastPublishCtx *)closure;
++
++    orbitMutex_Lock(ctx->mu);
++    ctx->ackSubDone = true;
++    orbitCondition_Broadcast(ctx->cond);
++    orbitMutex_Unlock(ctx->mu);
++}
++
+ static void
+ _reportErr(jsFastPublishCtx *ctx, natsStatus s, const char *desc)
+ {
+@@ -442,6 +456,12 @@ _ensureInbox(jsFastPublishCtx *ctx)
+ 
+     s = natsConnection_Subscribe(&sub, ctx->nc, subFilter, _onAck, ctx);
+     free(subFilter);
++    if (s == NATS_OK)
++    {
++        s = natsSubscription_SetOnCompleteCB(sub, _onAckSubComplete, ctx);
++        if (s != NATS_OK)
++            natsSubscription_Destroy(sub);
++    }
+     if (s != NATS_OK)
+     {
+         free(inboxPrefix);
+@@ -823,7 +843,22 @@ jsFastPublish_Destroy(jsFastPublishCtx *ctx)
+ 
+     if (ctx->ackSub != NULL)
+     {
++        // _onAck may still be running, or be invoked one last time, on the
++        // subscription's dispatcher after Unsubscribe returns. Wait for the
++        // on-complete callback before freeing anything it touches. Bounded,
++        // in case the subscription was already closed and the callback ran
++        // before we got here (ackSubDone is then already set) or never runs.
+         natsSubscription_Unsubscribe(ctx->ackSub);
++        orbitMutex_Lock(ctx->mu);
++        int64_t deadline = nats_Now() + 5000;
++        while (!ctx->ackSubDone)
++        {
++            int64_t remaining = deadline - nats_Now();
++            if (remaining <= 0)
++                break;
++            orbitCondition_TimedWait(ctx->cond, ctx->mu, remaining);
++        }
++        orbitMutex_Unlock(ctx->mu);
+         natsSubscription_Destroy(ctx->ackSub);
+     }
+     if (ctx->commitAck != NULL)

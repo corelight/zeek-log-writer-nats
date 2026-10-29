@@ -13,6 +13,7 @@
 #include "NATS.h"
 #include "NATSCoreWriter.h"
 #include "NATSFastPublishWriter.h"
+#include "NATSFastThreadWriter.h"
 #include "config.h"
 
 namespace zeek::plugin::Zeek_Log_Writer_NATS {
@@ -35,6 +36,8 @@ WriterBackend* Instantitate(WriterFrontend* frontend) {
         return NATSWriter::Instantiate(frontend);
     else if ( publish_mode == "LogNATS::PUBLISH_MODE_FAST" )
         return NATSFastPublishWriter::Instantiate(frontend);
+    else if ( publish_mode == "LogNATS::PUBLISH_MODE_FAST_THREAD" )
+        return NATSFastThreadWriter::Instantiate(frontend);
 
     eprintf("Unknown publish_mode=%s", publish_mode.c_str());
     return nullptr;

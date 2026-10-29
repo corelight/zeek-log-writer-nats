@@ -20,6 +20,23 @@ inline Result Ok() { return Result{true, NATS_OK, std::nullopt}; }
 inline Result Error(natsStatus status, std::string msg) { return {false, status, std::move(msg)}; }
 
 /**
+ * The last libnats error of the calling thread, never NULL.
+ *
+ * libnats and orbit.c don't set an error for every failure, in which case
+ * nats_GetLastError() returns NULL. Falls back to the text of status s.
+ */
+inline const char* LastError(natsStatus s) {
+    if ( const char* error = nats_GetLastError(nullptr); error && *error )
+        return error;
+
+    if ( const char* text = natsStatus_GetText(s); text )
+        return text;
+
+    return "unknown error";
+}
+
+
+/**
  * Sharing policy for ConnectionFactory::Create()
  */
 enum class ConnectionSharingPolicy {
@@ -66,6 +83,8 @@ struct FastPublisherOptions {
 class Connection;
 class FastPublisher;
 using FastPublisherPtr = std::shared_ptr<FastPublisher>;
+class FastBatch;
+struct FastBatchConfig;
 
 /**
  * This is used as the closure for the connection callbacks.
@@ -148,6 +167,25 @@ public:
     FastPublisherPtr CreateFastPublisher(FastPublishBatchPolicy policy, FastPublisherOptions opts);
 
     /**
+     * Returns the fast-ingest batch shared by all writers of this connection
+     * publishing to the stream of cfg, creating it if needed, and registers
+     * the caller with it. The configuration of the first caller is used.
+     *
+     * The caller must call FastBatch::Release() when done.
+     */
+    std::shared_ptr<FastBatch> AcquireFastBatch(const FastBatchConfig& cfg);
+
+    /**
+     * @return true if the underlying connection is currently connected.
+     *
+     * Lock-free, it's called for every write: the state is tracked from
+     * the connection callbacks rather than queried with
+     * natsConnection_Status(), which takes the connection's mutex that
+     * publishing holds while flushing.
+     */
+    bool IsConnected() { return connected.load(std::memory_order_acquire); }
+
+    /**
      * Helper tuple returned from Create()
      */
     using CreateResult = std::tuple<bool, std::shared_ptr<Connection>, std::optional<std::string>>;
@@ -177,10 +215,16 @@ protected:
 
 private:
     std::atomic<uint64_t> epoch{0};
+    // Set and cleared by the connection callbacks, see IsConnected().
+    std::atomic<bool> connected{false};
     static std::mutex connections_mtx;
     static std::map<std::string, std::weak_ptr<Connection>> connections;
 
     FastPublisherPtr shared_publisher;
+
+    // One shared fast-ingest batch per stream, see AcquireFastBatch().
+    std::mutex fast_batches_mtx;
+    std::map<std::string, std::weak_ptr<FastBatch>> fast_batches;
 };
 
 /**

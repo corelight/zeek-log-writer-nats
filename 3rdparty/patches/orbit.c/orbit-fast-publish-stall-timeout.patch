@@ -1,0 +1,130 @@
+diff --git a/jetstream-extra/src/fast_publish.c b/jetstream-extra/src/fast_publish.c
+index 80e1bc2..bc5e58f 100644
+--- a/jetstream-extra/src/fast_publish.c
++++ b/jetstream-extra/src/fast_publish.c
+@@ -76,6 +76,9 @@ struct __jsFastPublishCtx
+     uint64_t ackSequence;
+     char    *batchSubject;
+     bool     closed;
++    // The batch was closed only because an Add stalled past ackTimeoutMs.
++    // The server may still hold it, so jsFastPublish_Close can commit it.
++    bool     stallTimedOut;
+ 
+     bool firstAckArrived;
+ 
+@@ -491,6 +494,16 @@ _publishPing(jsFastPublishCtx *ctx)
+                                          NULL, 0);
+ }
+ 
++// Report the batch state after publishing message seq. Caller holds ctx->mu.
++static void
++_fillAck(jsFastPubAck *ackOut, jsFastPublishCtx *ctx, uint64_t seq)
++{
++    if (ackOut == NULL)
++        return;
++    ackOut->BatchSequence = seq;
++    ackOut->AckSequence   = ctx->ackSequence;
++}
++
+ // Common publish path for the Add family.
+ static natsStatus
+ _addPublish(jsFastPubAck *ackOut, jsFastPublishCtx *ctx,
+@@ -575,7 +588,9 @@ _addPublish(jsFastPubAck *ackOut, jsFastPublishCtx *ctx,
+             int64_t remaining = deadline - nats_Now();
+             if (remaining <= 0)
+             {
+-                ctx->closed = true;
++                ctx->closed        = true;
++                ctx->stallTimedOut = true;
++                _fillAck(ackOut, ctx, seq);
+                 orbitMutex_Unlock(ctx->mu);
+                 return NATS_TIMEOUT;
+             }
+@@ -583,6 +598,7 @@ _addPublish(jsFastPubAck *ackOut, jsFastPublishCtx *ctx,
+         }
+         if (ctx->closed && !ctx->firstAckArrived)
+         {
++            _fillAck(ackOut, ctx, seq);
+             orbitMutex_Unlock(ctx->mu);
+             return NATS_ERR;
+         }
+@@ -605,7 +621,9 @@ _addPublish(jsFastPubAck *ackOut, jsFastPublishCtx *ctx,
+             int64_t now = nats_Now();
+             if (now >= deadline)
+             {
+-                ctx->closed = true;
++                ctx->closed        = true;
++                ctx->stallTimedOut = true;
++                _fillAck(ackOut, ctx, seq);
+                 orbitMutex_Unlock(ctx->mu);
+                 return NATS_TIMEOUT;
+             }
+@@ -627,16 +645,13 @@ _addPublish(jsFastPubAck *ackOut, jsFastPublishCtx *ctx,
+         }
+         if (ctx->closed)
+         {
++            _fillAck(ackOut, ctx, seq);
+             orbitMutex_Unlock(ctx->mu);
+             return NATS_ERR;
+         }
+     }
+ 
+-    if (ackOut != NULL)
+-    {
+-        ackOut->BatchSequence = seq;
+-        ackOut->AckSequence   = ctx->ackSequence;
+-    }
++    _fillAck(ackOut, ctx, seq);
+ 
+     orbitMutex_Unlock(ctx->mu);
+     return NATS_OK;
+@@ -814,11 +829,22 @@ jsFastPublish_Close(jsPubAck **pubAck, jsFastPublishCtx *ctx, int64_t timeout)
+         return NATS_INVALID_ARG;
+ 
+     orbitMutex_Lock(ctx->mu);
+-    if (ctx->closed || ctx->sequence == 0 || ctx->batchSubject == NULL)
++    if ((ctx->closed && !ctx->stallTimedOut) || ctx->sequence == 0
++        || ctx->batchSubject == NULL)
+     {
+         orbitMutex_Unlock(ctx->mu);
+         return NATS_ERR;
+     }
++    if (ctx->closed)
++    {
++        // Closed by a stall timeout only: the server may still hold the
++        // batch, and messages published so far may have been persisted.
++        // Reopen for the end-of-batch commit, which confirms them and ends
++        // the batch on the server instead of leaving it to the server's
++        // batch timeout.
++        ctx->closed        = false;
++        ctx->stallTimedOut = false;
++    }
+     orbitMutex_Unlock(ctx->mu);
+ 
+     return _commit(pubAck, ctx, NULL, NULL, 0, NULL, NULL, timeout, true);
+diff --git a/jetstream-extra/src/fast_publish.h b/jetstream-extra/src/fast_publish.h
+index af90bd0..b5f4505 100644
+--- a/jetstream-extra/src/fast_publish.h
++++ b/jetstream-extra/src/fast_publish.h
+@@ -251,7 +251,9 @@ jsFastPublishCtx_Create(jsFastPublishCtx **ctx, natsConnection *nc,
+  *
+  * The reported #jsFastPubAck reflects the batch state at the moment Add
+  * returns; `AckSequence` may trail `BatchSequence`. Pass `NULL` for
+- * `ack` to discard this information.
++ * `ack` to discard this information. It's also filled when the message
++ * was published but waiting for flow acks failed, e.g. with #NATS_TIMEOUT,
++ * so the caller learns which messages were confirmed meanwhile.
+  *
+  * If the batch has already been closed (by commit, fatal gap, explicit
+  * close, or a transport error) the call fails with #NATS_ERR and the
+@@ -354,7 +356,9 @@ jsFastPublish_CommitMsg(jsPubAck **pubAck, jsFastPublishCtx *ctx, natsMsg *msg,
+  *
+  * Returns #NATS_ERR if no message has been successfully added to the
+  * batch, or if the batch is already closed; `*pubAck` is unchanged in
+- * either case.
++ * either case. A batch closed only because #jsFastPublish_Add stalled
++ * past `AckTimeout` can still be closed: the server may still hold it,
++ * and the commit ack confirms what it persisted.
+  *
+  * On #NATS_OK `*pubAck` is set to a newly allocated #jsPubAck that the
+  * caller must release with `jsPubAck_Destroy()`. Pass `NULL` for

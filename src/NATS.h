@@ -10,22 +10,11 @@
 #include "zeek/threading/formatters/JSON.h"
 
 #include "Connection.h"
+#include "WriterStats.h"
 
 using namespace zeek::logging;
 
 namespace zeek::plugin::Zeek_Log_Writer_NATS::detail {
-
-struct NATSWriterStats {
-    std::atomic<zeek_uint_t> dropped_writes = 0;
-    std::atomic<zeek_uint_t> publish_errors = 0;
-    std::atomic<zeek_uint_t> publish_acks = 0;
-    std::atomic<zeek_uint_t> publish_timeouts = 0;
-    // Pending publishes that have neither been acked,
-    // timed out, or otherwise failed. May go negative,
-    // but that's probably a bug. This value is exposed
-    // per writer as metric.
-    std::atomic<zeek_int_t> pending = 0;
-};
 
 class NATSWriter : public WriterBackend {
 public:
@@ -39,20 +28,21 @@ public:
     // Callback for message acknowledgements.
     void PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate);
 
-    // Callback for message delivery errors.
-    void PublishError(natsStatus err, int js_err, const char* text);
+    // Callback for message delivery errors. n is the number of
+    // messages affected by the error.
+    void PublishError(natsStatus err, int js_err, const char* text, zeek_uint_t n = 1);
 
-    // Drop a write. That is something the log writer decided
+    // Drop n writes. That is something the log writer decided
     // to actively drop, rather than hit libnats limits.
-    void DropWrite(natsStatus err, const char* text);
+    void DropWrite(natsStatus err, const char* text, zeek_uint_t n = 1);
 
-    void IncrementPending() { ++writer_stats.pending; }
-    void DecrementPending() { --writer_stats.pending; }
+    void IncrementPending() { ++writer_stats->pending; }
+    void DecrementPending() { --writer_stats->pending; }
 
     // Return true if this write should be dropped to prevent stalling.
     bool MayStall() const {
         if ( publish_async_no_stall && publish_async_max_pending > 0 )
-            return writer_stats.pending >= publish_async_max_pending;
+            return writer_stats->pending >= publish_async_max_pending;
 
         return false;
     };
@@ -87,6 +77,21 @@ protected:
 
     std::shared_ptr<Connection>& Conn() { return conn; }
 
+    const std::string& StreamName() const { return stream_name; }
+
+    const std::shared_ptr<NATSWriterStats>& Stats() const { return writer_stats; }
+
+    zeek_uint_t PublishErrorLog() const { return publish_error_log; }
+
+    bool PublishAsyncNoStall() const { return publish_async_no_stall; }
+
+    int64_t PublishAsyncCompleteMaxWaitMs() const { return publish_async_complete_max_wait_ms; }
+
+    /**
+     * @return true if streams created by Connect() need allow_batched.
+     */
+    virtual bool StreamAllowBatched() const { return false; }
+
 private:
     std::shared_ptr<Connection> conn = nullptr;
     jsCtx* js = nullptr;
@@ -101,6 +106,7 @@ private:
     std::string stream_subject;
     std::vector<const char*> stream_subjects;
     zeek_uint_t stream_storage;
+    bool stream_persist_async;
     int64_t connection_timeout_ms;
     int64_t ping_interval_ms;
     int64_t reconnect_wait_ms;
@@ -114,7 +120,9 @@ private:
     std::string json_timestamps;
     std::string path_escape_policy;
 
-    NATSWriterStats writer_stats;
+    // Shared with the fast-ingest publisher thread, which may account
+    // for this writer's messages after it's gone.
+    std::shared_ptr<NATSWriterStats> writer_stats = std::make_shared<NATSWriterStats>();
     zeek_uint_t publish_error_log;
     zeek_uint_t dropped_writes_log;
     int64_t publish_async_max_pending;
