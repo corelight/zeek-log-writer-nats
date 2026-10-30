@@ -18,7 +18,12 @@ public:
     static WriterBackend* Instantiate(WriterFrontend* frontend) { return new NATSFastPublishWriter(frontend); }
 
 protected:
-    bool DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) override;
+    bool DoWrites(int num_fields, const threading::Field* const* fields,
+                  std::span<zeek::logging::detail::LogRecord> record) override;
+
+    bool DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) override {
+        return false;
+    }
 
     bool DoHeartbeat(double network_time, double current_time) override;
 
@@ -28,6 +33,10 @@ private:
     FastPublishBatchPolicy batch_policy;
     FastPublisherPtr fast_publisher;
     FastPublisherOptions opts;
+
+    std::vector<zeek::threading::Value*> valps;
+    std::vector<std::span<const char>> spans;
+    std::vector<zeek::ODesc> descs;
 };
 
 } // namespace zeek::plugin::Zeek_Log_Writer_NATS::detail

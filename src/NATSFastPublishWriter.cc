@@ -54,7 +54,8 @@ NATSFastPublishWriter::NATSFastPublishWriter(WriterFrontend* frontend)
 }
 
 
-bool NATSFastPublishWriter::DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) {
+bool NATSFastPublishWriter::DoWrites(int num_fields, const threading::Field* const* fields,
+                                     std::span<zeek::logging::detail::LogRecord> records) {
     if ( Conn()->Epoch() == 0 ) {
         // XXX: Can we do better than dropping everything
         // before being connected for the first time?
@@ -65,17 +66,36 @@ bool NATSFastPublishWriter::DoWrite(int num_fields, const threading::Field* cons
     if ( ! fast_publisher )
         fast_publisher = Conn()->CreateFastPublisher(batch_policy, opts);
 
+    // debug("Got a batch of %zu", records.size());
 
-    if ( ! Format(Desc(), num_fields, fields, vals) ) {
-        DropWrite(NATS_ERR, "FormatMessage() failed");
-        return true;
+    descs.resize(records.size());
+    spans.resize(records.size());
+    valps.resize(num_fields);
+
+    for ( auto& desc : descs )
+        desc.Clear();
+
+    for ( size_t i = 0; i < records.size(); i++ ) {
+        auto record = records[i];
+
+        for ( size_t j = 0; j < record.size(); j++ )
+            valps[j] = &record[j];
+
+        if ( ! Format(descs[i], num_fields, fields, valps.data()) ) {
+            // XXX: Drop all of the writes? We just lost a whole batch.
+            DropWrite(NATS_ERR, "FormatMessage() failed");
+            return true;
+        }
+
+        spans[i] = std::span{descs[i].Description(), descs[i].Size()};
     }
 
     const char* subject = PublishSubject().c_str();
 
-    if ( auto [ok, status, error] = fast_publisher->AddMsg(subject, Desc().Bytes(), static_cast<int>(Desc().Size()));
-         ! ok )
+    if ( auto [ok, status, error] = fast_publisher->AddMsgs(subject, spans); ! ok ) {
+        // XXX: Dropped a lot more!
         DropWrite(status, error->c_str());
+    }
 
     return true;
 }
