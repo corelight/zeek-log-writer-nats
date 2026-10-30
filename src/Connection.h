@@ -8,6 +8,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <tuple>
 
@@ -217,6 +218,11 @@ public:
     }
 
     /**
+     * Batched version taking a span of pre-rendered messages.
+     */
+    Result AddMsgs(const char* subject, std::span<std::span<const char>> msgs) { return DoAddMsgs(subject, msgs); }
+
+    /**
      * Commit the batch even if it's not full.
      */
     virtual Result Commit();
@@ -238,6 +244,21 @@ public:
 
 protected:
     virtual Result DoAddMsg(natsMsg* msg, const char* subject, const void* data, int data_len);
+
+    virtual Result DoAddMsgs(const char* subject, std::span<std::span<const char>> msgs) {
+        for ( const auto& msg : msgs ) {
+            const void* data = msg.data();
+            int data_len = msg.size();
+
+            auto result = FastPublisher::DoAddMsg(/*msg=*/nullptr, subject, data, data_len);
+
+            // not ok?
+            if ( ! std::get<0>(result) )
+                return result;
+        }
+
+        return Ok();
+    }
 
     std::shared_ptr<Connection> conn;
     FastPublisherOptions opts;
@@ -261,6 +282,11 @@ protected:
 class SharedFastPublisher : public FastPublisher {
 public:
     SharedFastPublisher(std::shared_ptr<Connection> conn, FastPublisherOptions opts);
+
+    Result DoAddMsgs(const char* subject, std::span<std::span<const char>> msgs) override {
+        std::scoped_lock lock{mtx};
+        return FastPublisher::DoAddMsgs(subject, msgs);
+    }
 
     Result DoAddMsg(natsMsg* msg, const char* subject, const void* data, int data_len) override {
         std::scoped_lock lock{mtx};
