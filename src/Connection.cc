@@ -431,7 +431,7 @@ void fp_err_handler(natsStatus status, const char* description, void* closure) {
 
 
 FastPublisher::FastPublisher(std::shared_ptr<Connection> conn, FastPublisherOptions opts)
-    : conn(std::move(conn)), opts(std::move(opts)) {
+    : conn(std::move(conn)), opts(std::move(opts)), idle_ts(nats_Now()) {
     debug("FastPublisher constructor");
 }
 
