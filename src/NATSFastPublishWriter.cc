@@ -68,7 +68,13 @@ bool NATSFastPublishWriter::DoWrites(int num_fields, const threading::Field* con
 
     // debug("Got a batch of %zu", records.size());
 
-    descs.resize(records.size());
+    if ( records.size() > descs.size() ) {
+        // The ODesc destructors free their buffer when
+        // reallocation happens. Prevent this here.
+        descs.clear();
+        descs.resize(records.size());
+    }
+
     spans.resize(records.size());
     valps.resize(num_fields);
 
