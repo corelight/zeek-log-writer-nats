@@ -59,6 +59,7 @@ struct FastPublisherOptions {
     uint16_t flow;
     uint16_t max_outstanding_acks;
     int64_t commit_timeout_ms;
+    int64_t ack_timeout_ms;
     int64_t idle_timeout_ms = 1000;
     bool continue_on_gap = true;
 };

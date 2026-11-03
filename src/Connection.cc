@@ -459,6 +459,7 @@ Result FastPublisher::DoAddMsg(natsMsg* msg, const char* subject, const void* da
         fp_opts.Flow = opts.flow;
         fp_opts.MaxOutstandingAcks = opts.max_outstanding_acks;
         fp_opts.ContinueOnGap = opts.continue_on_gap;
+        fp_opts.AckTimeout = opts.ack_timeout_ms;
 
         natsConnection* nc = conn->RawConnection();
 
