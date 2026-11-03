@@ -35,6 +35,8 @@ NATSFastPublishWriter::NATSFastPublishWriter(WriterFrontend* frontend)
     opts.max_batch_size = zeek::id::find_val<zeek::StringVal>("LogNATS::fast_publish_max_batch_size")->AsCount();
     opts.commit_timeout_ms =
         static_cast<int64_t>(zeek::id::find_val("LogNATS::fast_publish_commit_timeout")->AsInterval() * 1000);
+    opts.ack_timeout_ms =
+        static_cast<int64_t>(zeek::id::find_val("LogNATS::fast_publish_ack_timeout")->AsInterval() * 1000);
 
     auto batch_policy_str = zeek::obj_desc_short(zeek::id::find_val("LogNATS::fast_publish_batch_policy").get());
 
