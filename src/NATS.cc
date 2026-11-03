@@ -15,7 +15,8 @@
 using namespace zeek::logging;
 using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
 
-NATSWriter::NATSWriter(WriterFrontend* frontend, bool send_heartbeats) : WriterBackend(frontend, send_heartbeats) {
+NATSWriter::NATSWriter(WriterFrontend* frontend, bool send_heartbeats)
+    : WriterBackend(frontend, send_heartbeats), writer_stats(std::make_shared<NATSWriterStats>()) {
     // Initialize the NATS metrics with callbacks that use
     // the embedded WriterStats in in a NATSWriter instance.
     std::vector<telemetry::LabelView> labels = {{"filter-name", frontend->GetFilterName()},
@@ -24,31 +25,31 @@ NATSWriter::NATSWriter(WriterFrontend* frontend, bool send_heartbeats) : WriterB
     dropped_writes_total = zeek::telemetry_mgr->CounterInstance(
         "zeek", "nats-log-writer-backend-dropped-writes", labels,
         "Dropped log writes of the NATS log writer because of connectivity issues or other problems.", "",
-        [stats = &writer_stats]() { return static_cast<double>(stats->dropped_writes); }),
+        [stats = writer_stats]() { return static_cast<double>(stats->dropped_writes); }),
 
     publish_errors_total =
         zeek::telemetry_mgr
             ->CounterInstance("zeek", "nats-log-writer-backend-publish-errors", labels,
                               "Publish errors reported from the NATS server via the installed AckHandler", "",
-                              [stats = &writer_stats]() { return static_cast<double>(stats->publish_errors); }),
+                              [stats = writer_stats]() { return static_cast<double>(stats->publish_errors); }),
 
     publish_timeouts_total =
         zeek::telemetry_mgr
             ->CounterInstance("zeek", "nats-log-writer-backend-publish-timeouts", labels,
                               "Publish timeouts when publish_async_max_wait or publish_async_stall_wait_ms were hit",
-                              "", [stats = &writer_stats]() { return static_cast<double>(stats->publish_timeouts); }),
+                              "", [stats = writer_stats]() { return static_cast<double>(stats->publish_timeouts); }),
 
     publish_acks_total =
         zeek::telemetry_mgr->CounterInstance("zeek", "nats-log-writer-backend-publish-acks", labels,
                                              "Publish acknowledgements reported via the installed AckHandler", "",
-                                             [stats = &writer_stats]() {
+                                             [stats = writer_stats]() {
                                                  return static_cast<double>(stats->publish_acks);
                                              });
 
     publishes_pending =
         zeek::telemetry_mgr->GaugeInstance("zeek", "nats-log-writer-backend-publishes-pending", labels,
                                            "In-flight publishes neither confirmed nor failed", "",
-                                           [stats = &writer_stats]() { return static_cast<double>(stats->pending); });
+                                           [stats = writer_stats]() { return static_cast<double>(stats->pending); });
 
     // Read script-layer globals on the main thread. DoInit runs in the writer
     // backend thread where global_scope() is not safe to access.
@@ -157,15 +158,15 @@ std::string escape_path(const std::string& path, const char* prefix) {
 } // namespace
 
 void NATSWriter::PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate) {
-    ++writer_stats.publish_acks;
+    ++writer_stats->publish_acks;
 }
 
 void NATSWriter::PublishError(natsStatus err, int js_err, const char* text) {
-    auto errors = ++writer_stats.publish_errors;
+    auto errors = ++writer_stats->publish_errors;
 
     // Track timeouts as a separate metric.
     if ( err == NATS_TIMEOUT )
-        ++writer_stats.publish_timeouts;
+        ++writer_stats->publish_timeouts;
 
     if ( publish_error_log == 0 )
         return;
@@ -179,7 +180,7 @@ void NATSWriter::PublishError(natsStatus err, int js_err, const char* text) {
 
 
 void NATSWriter::DropWrite(natsStatus err, const char* text) {
-    auto dropped_writes = ++writer_stats.dropped_writes;
+    auto dropped_writes = ++writer_stats->dropped_writes;
 
     if ( dropped_writes_log == 0 )
         return;
@@ -453,7 +454,7 @@ bool NATSWriter::DoFinish(double network_time) {
         natsMsgList pending;
         if ( s = js_PublishAsyncGetPendingList(&pending, js); s == NATS_OK ) {
             eprintf("%s: DoFinish: Had %d pending messages", Info().path, pending.Count);
-            writer_stats.dropped_writes += pending.Count;
+            writer_stats->dropped_writes += pending.Count;
 
             natsMsgList_Destroy(&pending);
         }

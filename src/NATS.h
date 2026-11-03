@@ -46,13 +46,13 @@ public:
     // to actively drop, rather than hit libnats limits.
     void DropWrite(natsStatus err, const char* text);
 
-    void IncrementPending() { ++writer_stats.pending; }
-    void DecrementPending() { --writer_stats.pending; }
+    void IncrementPending() { ++writer_stats->pending; }
+    void DecrementPending() { --writer_stats->pending; }
 
     // Return true if this write should be dropped to prevent stalling.
     bool MayStall() const {
         if ( publish_async_no_stall && publish_async_max_pending > 0 )
-            return writer_stats.pending >= publish_async_max_pending;
+            return writer_stats->pending >= publish_async_max_pending;
 
         return false;
     };
@@ -87,6 +87,8 @@ protected:
 
     std::shared_ptr<Connection>& Conn() { return conn; }
 
+    std::shared_ptr<NATSWriterStats> writer_stats;
+
 private:
     std::shared_ptr<Connection> conn = nullptr;
     jsCtx* js = nullptr;
@@ -114,7 +116,6 @@ private:
     std::string json_timestamps;
     std::string path_escape_policy;
 
-    NATSWriterStats writer_stats;
     zeek_uint_t publish_error_log;
     zeek_uint_t dropped_writes_log;
     int64_t publish_async_max_pending;
