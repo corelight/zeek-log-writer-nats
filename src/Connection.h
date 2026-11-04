@@ -305,6 +305,9 @@ protected:
     FastPublisherOptions opts;
     jsFastPublishCtx* fp_ctx = nullptr;
 
+    // The Epoch() value when fp_ctx was created.
+    uint64_t fp_epoch = 0;
+
     // Make those atomic so that reading isn't upsetting TSAN.
     std::atomic<int64_t> idle_ts = 0;
 

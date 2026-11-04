@@ -530,6 +530,8 @@ Result FastPublisher::OpenBatch() {
         return Error(s, error);
     }
 
+    fp_epoch = conn->Epoch();
+
     return Ok();
 }
 
@@ -570,16 +572,14 @@ Result FastPublisher::CloseBatchImpl(bool commit) {
         eprintf("CloseBatch: this=%p Failing %zu pending entries last_ack_seq=%" PRIu64, this, pending.size(),
                 last_ack_seq);
         for ( const auto& p : pending ) {
-            debug("seq=%" PRIu64 " len=%" PRIu64 "\n", p.seq, p.len);
+            debug("Failing: seq=%" PRIu64 " len=%" PRIu64 "\n", p.seq, p.len);
         }
         FailPending();
 
         assert(pending.size() == 0);
     }
 
-    eprintf("CloseBatch: this=%p jsFastPublish_Destroy()", this);
     jsFastPublish_Destroy(fp_ctx);
-    eprintf("CloseBatch: this=%p jsFastPublish_Destroy() done", this);
     fp_ctx = nullptr;
     last_batch_seq = 0;
     last_ack_seq = 0;
@@ -591,11 +591,14 @@ Result FastPublisher::CloseBatchImpl(bool commit) {
 Result FastPublisher::AddMsgsImpl(const char* subject, std::span<std::span<const char>> msgs, CompletionCallback ccb) {
     natsStatus s = NATS_OK;
 
+    if ( fp_ctx && (conn->Epoch() != fp_epoch || ! conn->IsConnected()) ) {
+        CloseBatchImpl(/*commit=*/false);
+        FailPending();
+    }
+
     // Don't try to do anything if the connection isn't up. We'll just run
     // into timeouts and then Zeek starts dropping log writes anyhow.
     if ( ! conn->IsConnected() ) {
-        CloseBatchImpl(false);
-        FailPending();
         ccb(CompletionInfo{NATS_NOT_YET_CONNECTED, /*dropped=*/msgs.size(), /*failed=*/0});
         return Error(NATS_NOT_YET_CONNECTED, "not yet connected");
     }
