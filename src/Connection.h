@@ -4,6 +4,8 @@
 #include <nats/nats.h>
 #include <nats/status.h>
 #include <atomic>
+#include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -11,6 +13,7 @@
 #include <span>
 #include <string>
 #include <tuple>
+#include <vector>
 
 namespace zeek::plugin::Zeek_Log_Writer_NATS::detail {
 
@@ -34,6 +37,7 @@ enum class ConnectionSharingPolicy {
 enum class FastPublishBatchPolicy : uint8_t {
     EXCLUSIVE,
     SHARED,
+    POOLED,
 };
 
 
@@ -55,19 +59,28 @@ struct ConnectionOptions {
  * Options for a fast ingest publisher.
  */
 struct FastPublisherOptions {
-    size_t max_batch_size;
     uint16_t flow;
     uint16_t max_outstanding_acks;
     int64_t commit_timeout_ms;
     int64_t ack_timeout_ms;
-    int64_t idle_timeout_ms = 1000;
-    bool continue_on_gap = true;
+    int64_t idle_timeout_ms = 5000;
+
+    // For now, always fail the batch on a gap!
+    bool continue_on_gap = false;
+
+    // For BATCH_POOLED policy.
+    uint16_t pool_size = 0;
 };
 
 
 class Connection;
 class FastPublisher;
+class SharedFastPublisher;
+class PooledFastPublisher;
+
 using FastPublisherPtr = std::shared_ptr<FastPublisher>;
+using SharedFastPublisherPtr = std::shared_ptr<SharedFastPublisher>;
+using PooledFastPublisherPtr = std::shared_ptr<PooledFastPublisher>;
 
 /**
  * This is used as the closure for the connection callbacks.
@@ -154,7 +167,12 @@ public:
     natsConnection* RawConnection() { return natsConn; }
 
 
-    FastPublisherPtr CreateFastPublisher(FastPublishBatchPolicy policy, FastPublisherOptions opts);
+    FastPublisherPtr GetFastPublisher(FastPublishBatchPolicy policy, FastPublisherOptions opts);
+
+    /**
+     * Hand back a fast publisher instance acquired with Get()
+     */
+    void PutFastPublisher(FastPublisherPtr&& fast_publisher);
 
     /**
      * Helper tuple returned from Create()
@@ -192,60 +210,69 @@ private:
     static std::map<std::string, std::weak_ptr<Connection>> connections;
 
     FastPublisherPtr shared_publisher;
+    PooledFastPublisherPtr pooled_publisher;
 };
 
 /**
- * A fast publish batch that commits when full.
+ * A fast-ingest publisher.
  */
 class FastPublisher {
 public:
     FastPublisher(std::shared_ptr<Connection> conn, FastPublisherOptions opts);
+
+    FastPublisher(const FastPublisher&) = delete;
+    FastPublisher(FastPublisher&&) = delete;
+    FastPublisher& operator=(FastPublisher&&) = delete;
+    FastPublisher& operator=(const FastPublisher&) = delete;
+
     virtual ~FastPublisher();
 
-    // TODO: Check this is the common pattern.
-    FastPublisher(const FastPublisher& o) = delete;
-    FastPublisher(FastPublisher&& o) = delete;
-    FastPublisher operator=(FastPublisher& o) = delete;
-    FastPublisher operator=(FastPublisher&& o) = delete;
-
     /**
-     * Creates a new batch if needed, may be blocking, may commit.
+     * Callback to update metrics on the log writer side.
      */
-    Result AddMsg(natsMsg* msg) {
-        /*blub*/
-        return DoAddMsg(msg, /*subject=*/nullptr, /*data=*/nullptr, /*data_len=*/0);
-    }
+    struct CompletionInfo {
+        natsStatus nats_status; // NATS status if available
+        uint64_t acked;         // positively confirmed by the server
+        uint64_t dropped;       // actively dropped because not connected
+        uint64_t failed;        // failed, server error, timeout, ...
+    };
 
     /**
-     * Creates a new batch if needed, may be blocking, may commit.
+     * Callback passed to AddMsgs()
+     */
+    using CompletionCallback = std::function<void(CompletionInfo info)>;
+
+    /**
+     * Submit all buffers in the provided span as messages at once,
+     * invoke ccb for completion once all messages have been acked
+     * by the server. In case of early dropping or failures, ccb is
+     * invoked with dropped or failed set on the struct.
      *
-     * This can be faster than AddMsg() taking a natsMsg because
-     * it avoids an intermediate natsMsg creation. But it also means
-     * you cannot set any headers.
+     * @param subject
+     * @param msgs
+     * @param ccb
      */
-    Result AddMsg(const char* subject, const void* data, int data_len) {
-        return DoAddMsg(/*msg=*/nullptr, subject, data, data_len);
+    virtual Result AddMsgs(const char* subject, std::span<std::span<const char>> msgs, CompletionCallback ccb) {
+        auto result = AddMsgsImpl(subject, msgs, ccb);
+        auto ok = std::get<0>(result);
+        if ( ! ok )
+            CloseBatchImpl(/*try_commit=*/false);
+
+        return result;
     }
 
     /**
-     * Batched version taking a span of pre-rendered messages.
+     * Close the batch that was opened with AddMsgs(), if any.
      */
-    Result AddMsgs(const char* subject, std::span<std::span<const char>> msgs) { return DoAddMsgs(subject, msgs); }
-
-    /**
-     * Commit the batch even if it's not full.
-     */
-    virtual Result Commit();
-
-    bool IsIdle() const {
-        // Meh, not sure this is great.
-        return (nats_Now() - idle_ts) > opts.idle_timeout_ms;
+    virtual Result CloseBatch(bool try_commit = true) {
+        // Delegate.
+        return CloseBatchImpl(try_commit);
     }
 
     /**
-     * @return The current batch_size. May be pretty large for unlimited batches.
+     * Helper to detect if a batch has been idle.
      */
-    size_t BatchSize() const { return batch_size; }
+    virtual bool IsIdle() const { return IsIdleImpl(); }
 
     /**
      * Error Callbacks.
@@ -253,62 +280,123 @@ public:
     void ErrorHandler(natsStatus status, const char* description);
 
 protected:
-    virtual Result DoAddMsg(natsMsg* msg, const char* subject, const void* data, int data_len);
+    /**
+     * Implementations.
+     */
+    Result AddMsgsImpl(const char* subject, std::span<std::span<const char>> msgs, CompletionCallback ccb);
+    Result CloseBatchImpl(bool try_commit = true);
+    bool IsIdleImpl() const { return (nats_Now() - idle_ts) > opts.idle_timeout_ms; }
 
-    virtual Result DoAddMsgs(const char* subject, std::span<std::span<const char>> msgs) {
-        for ( const auto& msg : msgs ) {
-            const void* data = msg.data();
-            int data_len = msg.size();
+    /**
+     * Helper method for walking the pending list based on the last_ack_seq
+     * set during DoAddMsgs().
+     */
+    void ProcessPending();
 
-            auto result = FastPublisher::DoAddMsg(/*msg=*/nullptr, subject, data, data_len);
+    /**
+     * Helper method reporting everything in pending as failed.
+     */
+    void FailPending();
 
-            // not ok?
-            if ( ! std::get<0>(result) )
-                return result;
-        }
 
-        return Ok();
-    }
+    Result OpenBatch();
 
     std::shared_ptr<Connection> conn;
     FastPublisherOptions opts;
     jsFastPublishCtx* fp_ctx = nullptr;
 
     // Make those atomic so that reading isn't upsetting TSAN.
-    std::atomic<size_t> batch_size = 0;
     std::atomic<int64_t> idle_ts = 0;
+
+    // Values as received from jsFastPublish_Add()
+    uint64_t last_batch_seq = 0;
+    uint64_t last_ack_seq = 0;
+
+    /**
+     * A data structure holding information about sequence and
+     * number of messages submitted via AddMsgs() in one go. Once
+     * the server has acked up to (seq + len - 1)
+     */
+    struct Pending {
+        uint64_t seq;
+        uint64_t len;
+
+        CompletionCallback completion_callback; // completion callback
+    };
+
+    /**
+     * List of pending/in-flight messages.
+     */
+    std::deque<Pending> pending;
 };
 
 /**
- * The shared fast publisher will have all threads calling AddMsg() in fast
- * succession and lock. It'll probably suck though it should be fast compared
- * to the underlying IO and stalling,.
- * We can also extend to a locked AddMsgs(std::span<natsMsg*> msgs)
- * if we're okay patching upstream Zeek (I think we should, it makes sense).
- *
- * TODO: Find a way to report metrics back. Maybe AddMsg() could take
- *       a pointer to WriterStats similar to #25?
+ * A single fast publisher instance holding a single batch open.
  */
 class SharedFastPublisher : public FastPublisher {
 public:
     SharedFastPublisher(std::shared_ptr<Connection> conn, FastPublisherOptions opts);
 
-    Result DoAddMsgs(const char* subject, std::span<std::span<const char>> msgs) override {
+    SharedFastPublisher(const SharedFastPublisher&) = delete;
+    SharedFastPublisher(SharedFastPublisher&&) = delete;
+    SharedFastPublisher& operator=(SharedFastPublisher&&) = delete;
+    SharedFastPublisher& operator=(const SharedFastPublisher&) = delete;
+
+    /**
+     * Lock the fast publisher, then add msgs.
+     */
+    Result AddMsgs(const char* subject, std::span<std::span<const char>> msgs, CompletionCallback ccb) override {
         std::scoped_lock lock{mtx};
-        return FastPublisher::DoAddMsgs(subject, msgs);
+        return FastPublisher::AddMsgs(subject, msgs, ccb);
     }
 
-    Result DoAddMsg(natsMsg* msg, const char* subject, const void* data, int data_len) override {
+    Result CloseBatch(bool try_commit = true) override {
         std::scoped_lock lock{mtx};
-        return FastPublisher::DoAddMsg(msg, subject, data, data_len);
-    }
-
-    Result Commit() override {
-        std::scoped_lock lock{mtx};
-        return FastPublisher::Commit();
+        return FastPublisher::CloseBatch(try_commit);
     }
 
 private:
     std::mutex mtx;
+};
+
+
+/**
+ * Helper class that keeps open N SharedFastPublisher instances to
+ * open multiple batches at the same time.
+ */
+class PooledFastPublisher : public FastPublisher {
+public:
+    PooledFastPublisher(std::shared_ptr<Connection> conn, size_t pool_size, FastPublisherOptions opts);
+
+    PooledFastPublisher(const PooledFastPublisher&) = delete;
+    PooledFastPublisher(PooledFastPublisher&&) = delete;
+    PooledFastPublisher& operator=(PooledFastPublisher&&) = delete;
+    PooledFastPublisher& operator=(const PooledFastPublisher&) = delete;
+
+    /**
+     * Add msgs to one of SharedFastPublisher instances in round-robin fashion.
+     */
+    Result AddMsgs(const char* subject, std::span<std::span<const char>> msgs, CompletionCallback ccb) override;
+
+    /**
+     * Run CloseBatch() on all of the batches in the pool.
+     */
+    Result CloseAllBatches(bool commit = true);
+
+protected:
+    // If all batches in the pool are idle, consider
+    // the whole pool idle, otherwise not.
+    //
+    // Not sure if this is clever, but given batches
+    // are round-robined, should be okay. Otherwise could
+    // also just add Heartbeat() to the fast publisher and
+    // commit individually when idle.
+    bool IsIdle() const override;
+
+private:
+    size_t pool_size;
+    size_t pool_index = 0;
+    std::vector<SharedFastPublisherPtr> pool;
+    mutable std::mutex mtx;
 };
 } // namespace zeek::plugin::Zeek_Log_Writer_NATS::detail

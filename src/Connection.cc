@@ -4,6 +4,7 @@
 #include <nats/status.h>
 #include <nats/version.h>
 #include <cstdio>
+#include <stdexcept>
 
 #include "Plugin.h"
 
@@ -357,12 +358,7 @@ Result Connection::Publish(natsMsg* msg) {
 }
 
 
-FastPublisherPtr Connection::CreateFastPublisher(FastPublishBatchPolicy policy, FastPublisherOptions opts) {
-    if ( Epoch() == 0 ) {
-        eprintf("CreateFastPublisher: not yet connected!\n");
-        return nullptr;
-    }
-
+FastPublisherPtr Connection::GetFastPublisher(FastPublishBatchPolicy policy, FastPublisherOptions opts) {
     if ( policy == FastPublishBatchPolicy::EXCLUSIVE )
         return std::make_shared<FastPublisher>(shared_from_this(), std::move(opts));
     else if ( policy == FastPublishBatchPolicy::SHARED ) {
@@ -375,10 +371,51 @@ FastPublisherPtr Connection::CreateFastPublisher(FastPublishBatchPolicy policy, 
             return shared_publisher;
         }
     }
+    else if ( policy == FastPublishBatchPolicy::POOLED ) {
+        // Should't be hot.
+        std::scoped_lock lock{mtx};
+        if ( ! pooled_publisher ) {
+            debug("Creating PooledFastPublisher pool_size=%" PRIu16, opts.pool_size);
+
+            pooled_publisher =
+                std::make_shared<PooledFastPublisher>(shared_from_this(), opts.pool_size, std::move(opts));
+        }
+
+        return pooled_publisher;
+    }
 
     eprintf("Unexpected\n");
 
     return nullptr;
+}
+
+void Connection::PutFastPublisher(FastPublisherPtr&& fp) {
+    // Should't be hot.
+    std::scoped_lock lock{mtx};
+
+    if ( fp == shared_publisher ) {
+        fp.reset();
+
+        if ( shared_publisher.use_count() == 1 ) {
+            debug("Releasing shared_publisher!");
+            shared_publisher->CloseBatch(/*commit=*/true);
+            shared_publisher.reset();
+        }
+    }
+    else if ( fp == pooled_publisher ) {
+        fp.reset();
+
+        if ( pooled_publisher.use_count() == 1 ) {
+            debug("Releasing pooled_publisher!");
+            pooled_publisher->CloseAllBatches(/*commit=*/true);
+            pooled_publisher.reset();
+        }
+    }
+
+    else {
+        fp->CloseBatch(/*commit=*/true);
+        fp.reset();
+    }
 }
 
 
@@ -436,125 +473,192 @@ void fp_err_handler(natsStatus status, const char* description, void* closure) {
 
 
 FastPublisher::FastPublisher(std::shared_ptr<Connection> conn, FastPublisherOptions opts)
-    : conn(std::move(conn)), opts(std::move(opts)), idle_ts(nats_Now()) {
-    debug("FastPublisher constructor");
-}
+    : conn(std::move(conn)), opts(std::move(opts)), idle_ts(nats_Now()) {}
 
 
 FastPublisher::~FastPublisher() {
-    // Poor man.
-    debug("FastPublisher destructor");
+    debug("FastPublisher destructor this=%p fp_ctx=%p pending=%zu", this, fp_ctx, pending.size());
 }
 
 
-Result FastPublisher::DoAddMsg(natsMsg* msg, const char* subject, const void* data, int data_len) {
+void FastPublisher::ProcessPending() {
+    auto it = pending.begin();
+
+    while ( it != pending.end() ) {
+        auto& entry = *it;
+
+        if ( last_ack_seq < (entry.seq + entry.len - 1) )
+            break;
+
+        // entry.seq + entry.len was acked by server.
+        entry.completion_callback(CompletionInfo{NATS_OK, /*acked=*/entry.len, /*dropped=*/0, /*failed=*/0});
+
+        it = pending.erase(it);
+    }
+}
+
+void FastPublisher::FailPending() {
+    auto it = pending.begin();
+    while ( it != pending.end() ) {
+        auto& entry = *it;
+        entry.completion_callback(CompletionInfo{NATS_ERR, /*acked=*/0, /*dropped=*/0, /*failed=*/entry.len});
+        it = pending.erase(it);
+    }
+}
+
+Result FastPublisher::OpenBatch() {
     natsStatus s = NATS_OK;
 
-    // Update idle timestamp
-    idle_ts = nats_Now();
+    jsFastPublisherOptions fp_opts;
+    if ( s = jsFastPublisherOptions_Init(&fp_opts); s != NATS_OK )
+        return Error(s, "failed to create options");
 
-    if ( ! fp_ctx ) {
-        // debug("AddMsg(): Creating new batch!\n");
-        jsFastPublisherOptions fp_opts;
-        if ( s = jsFastPublisherOptions_Init(&fp_opts); s != NATS_OK )
-            return Error(s, "failed to create options");
+    fp_opts.ErrHandler = fp_err_handler;
+    fp_opts.ErrHandlerClosure = this; // do we also need some callback state as indirection here?
+    fp_opts.Flow = opts.flow;
+    fp_opts.MaxOutstandingAcks = opts.max_outstanding_acks;
+    fp_opts.ContinueOnGap = opts.continue_on_gap;
 
-        fp_opts.ErrHandler = fp_err_handler;
-        fp_opts.ErrHandlerClosure = this; // do we also need some callback state as indirection here?
-        fp_opts.Flow = opts.flow;
-        fp_opts.MaxOutstandingAcks = opts.max_outstanding_acks;
-        fp_opts.ContinueOnGap = opts.continue_on_gap;
-        fp_opts.AckTimeout = opts.ack_timeout_ms;
+    natsConnection* nc = conn->RawConnection();
 
-        natsConnection* nc = conn->RawConnection();
-
-        // Create a batch here if needed. It'll be committed
-        // when it is full, or in DoHeartbeat() or DoFinish().
-        if ( s = jsFastPublishCtx_Create(&fp_ctx, nc, &fp_opts); s != NATS_OK ) {
-            eprintf("jsPublishCtx_Create failed");
-            std::string error = nats_GetLastError(nullptr);
-            return Error(s, error);
-        }
-    }
-
-    // How much more room in the batch before we commit? Zero means
-    const size_t left = opts.max_batch_size == 0 ? 0 : opts.max_batch_size - batch_size;
-
-    // Do we need BatchMsgOpts
-    // jsBatchMsgOpts opts;
-    // jsBatchMsgOpts_Init()
-
-    // left == 0: unlimited, left > 1: still room.
-    if ( left == 0 || left > 1 ) {
-        if ( msg )
-            s = jsFastPublish_AddMsg(/*ack=*/nullptr, fp_ctx, msg, /*opts=*/nullptr);
-        else
-            s = jsFastPublish_Add(/*ack=*/nullptr, fp_ctx, subject, data, data_len, /*opts=*/nullptr);
-
-        if ( s != NATS_OK )
-            return Error(s, "AddMsg failed");
-
-        ++batch_size;
-    }
-    else if ( left == 1 ) {
-        // max_batch_size reached
-        jsPubAck* pub_ack = nullptr;
-        // debug("AddMsg: Batch full, commit!\n");
-
-        if ( msg )
-            s = jsFastPublish_CommitMsg(&pub_ack, fp_ctx, msg, /*opts=*/nullptr, opts.commit_timeout_ms);
-        else
-            s = jsFastPublish_Commit(&pub_ack, fp_ctx, subject, data, data_len, /*opts=*/nullptr,
-                                     opts.commit_timeout_ms);
-
-        if ( s != NATS_OK ) {
-            std::string error = nats_GetLastError(nullptr);
-            eprintf("CommitMsg failed -- really bad: %s\n", error.c_str());
-            // PublishError(s, 0, "jsFastPublish_CommitMsg() failed");
-        }
-        else {
-            debug("Commit this=%p Sequence=%" PRIu64 " Count=%" PRIu64, this, pub_ack->Sequence, pub_ack->Count);
-
-            jsPubAck_Destroy(pub_ack); // should we do something with it? metrics?
-            pub_ack = nullptr;
-        }
-
-        jsFastPublish_Destroy(fp_ctx);
-        fp_ctx = nullptr;
-        batch_size = 0;
-    }
-    else {
-        eprintf("unexpected left %zu", left);
-        abort();
+    /**
+     * jsFastPublishCtx_Create() does not do remote calls, only
+     * prepares the context.
+     */
+    if ( s = jsFastPublishCtx_Create(&fp_ctx, nc, &fp_opts); s != NATS_OK ) {
+        std::string error = nats_GetLastError(nullptr);
+        return Error(s, error);
     }
 
     return Ok();
 }
 
-
-Result FastPublisher::Commit() {
+Result FastPublisher::CloseBatchImpl(bool commit) {
     if ( ! fp_ctx )
         return Ok();
 
     natsStatus s = NATS_OK;
-    jsPubAck* pub_ack = nullptr;
 
-    if ( s = jsFastPublish_Close(&pub_ack, fp_ctx, opts.commit_timeout_ms); s != NATS_OK ) {
-        std::string status_str = natsStatus_GetText(s);
+    if ( commit && ! jsFastPublish_IsClosed(fp_ctx) ) {
+        jsPubAck* pub_ack = nullptr;
+        debug("CloseBatch: this=%p last_batch_seq=%" PRIu64 " last_ack_seq=%" PRIu64, this, last_batch_seq,
+              last_ack_seq);
 
-        // TODO: Metric
-        eprintf("jsFastPublish_Close() failed: %s", status_str.c_str());
-        return Error(s, status_str);
+        if ( s = jsFastPublish_Close(&pub_ack, fp_ctx, opts.commit_timeout_ms); s == NATS_OK ) {
+            debug("CloseBatch: this=%p jsPubAck: Sequence=%" PRIu64 " Count=%" PRIu64, this, pub_ack->Sequence,
+                  pub_ack->Count);
+
+            // Is this valid? This is not valid. Sequence is the stream sequence.
+            // last_batch_seq = pub_ack->Sequence;
+
+            // This may not be valid in the face of gaps? I guess?
+            last_ack_seq = pub_ack->Count;
+
+            jsPubAck_Destroy(pub_ack);
+            pub_ack = nullptr;
+
+            // TODO: It'd be nice to get the last Sequence and Ack here!
+            ProcessPending();
+        }
+        else {
+            std::string status_str = natsStatus_GetText(s);
+            eprintf("CloseBatch: this=%p jsFastPublish_Close() failed: %s", this, status_str.c_str());
+        }
     }
 
-    debug("Commit this=%p Sequence=%" PRIu64 " Count=%" PRIu64, this, pub_ack->Sequence, pub_ack->Count);
+    if ( pending.size() > 0 ) {
+        eprintf("CloseBatch: this=%p Failing %zu pending entries last_ack_seq=%" PRIu64, this, pending.size(),
+                last_ack_seq);
+        for ( const auto& p : pending ) {
+            debug("seq=%" PRIu64 " len=%" PRIu64 "\n", p.seq, p.len);
+        }
+        FailPending();
 
-    jsPubAck_Destroy(pub_ack); // should we do something with it? metrics?
-    pub_ack = nullptr;
+        assert(pending.size() == 0);
+    }
+
+    eprintf("CloseBatch: this=%p jsFastPublish_Destroy()", this);
     jsFastPublish_Destroy(fp_ctx);
-
+    eprintf("CloseBatch: this=%p jsFastPublish_Destroy() done", this);
     fp_ctx = nullptr;
-    batch_size = 0;
+    last_batch_seq = 0;
+    last_ack_seq = 0;
+
+    return Ok();
+}
+
+
+Result FastPublisher::AddMsgsImpl(const char* subject, std::span<std::span<const char>> msgs, CompletionCallback ccb) {
+    natsStatus s = NATS_OK;
+
+    // Don't try to do anything if the connection isn't up. We'll just run
+    // into timeouts and then Zeek starts dropping log writes anyhow.
+    if ( ! conn->IsConnected() ) {
+        CloseBatchImpl(false);
+        FailPending();
+        ccb(CompletionInfo{NATS_NOT_YET_CONNECTED, /*dropped=*/msgs.size(), /*failed=*/0});
+        return Error(NATS_NOT_YET_CONNECTED, "not yet connected");
+    }
+
+
+    // If we do not have a batch open, open it now.
+    if ( ! fp_ctx ) {
+        if ( const auto& [ok, status, error] = OpenBatch(); ! ok ) {
+            // This should never fail. It just allocates some memory.
+            eprintf("ERROR: OpenBatch() failed: %s", error->c_str());
+            ccb(CompletionInfo{status, /*acked=*/0, /*dropped=*/0, /*failed=*/msgs.size()});
+            return Error(status, "failed to open batch");
+        }
+    }
+
+    uint64_t initial_seq = 0;
+    jsFastPubAck fast_pub_ack = {0, 0};
+
+    // debug("publishing %zu", msgs.size());
+
+    for ( const auto& msg : msgs ) {
+        const void* data = msg.data();
+        int data_len = msg.size();
+
+        // This will block when too many messages are in-flight,
+        // or the server has gone out for lunch.
+        s = jsFastPublish_Add(&fast_pub_ack, fp_ctx, subject, data, data_len, /*opts=*/nullptr);
+
+        if ( s != NATS_OK ) {
+            const char* status = natsStatus_GetText(s);
+            eprintf("XXX: this=%p jsFastPublish_Add() failed with: %s", this, status);
+
+            // Just report the whole batch as failed if anything
+            // in the batch failed.
+            ccb(CompletionInfo{s, /*acked=*/0, /*dropped=*/0, /*failed=*/msgs.size()});
+
+            std::string error = natsStatus_GetText(s);
+            return Error(s, error);
+        }
+
+        if ( initial_seq == 0 )
+            initial_seq = fast_pub_ack.BatchSequence;
+    }
+
+    idle_ts = nats_Now();
+
+    if ( initial_seq == 0 ) {
+        // Should never get here.
+        eprintf("ERROR: initial_seq was never set?");
+        ccb(CompletionInfo{NATS_ERR, /*acked=*/0, /*dropped=*/0, /*failed=*/msgs.size()});
+        return Ok();
+    }
+
+    // Add all messages to the pending list and immediately
+    // run ProcessPending() to invoke pending callbacks for
+    // anything that was acked.
+    pending.emplace_back(Pending{.seq = initial_seq, .len = msgs.size(), .completion_callback = std::move(ccb)});
+    last_batch_seq = fast_pub_ack.BatchSequence;
+    last_ack_seq = fast_pub_ack.AckSequence;
+
+    // Call completion callbacks for anything that has been
+    // confirmed by the server up to this point.
+    ProcessPending();
 
     return Ok();
 }
@@ -562,14 +666,78 @@ Result FastPublisher::Commit() {
 
 void FastPublisher::ErrorHandler(natsStatus status, const char* description) {
     const char* status_str = natsStatus_GetText(status);
-    eprintf("ERROR %s: %s", status_str, description);
+    eprintf("XXX XXX XXX FastPublisher::ErrorHandler: %s: %s this=%p XXX XXX XXX", status_str, description, this);
 
     // Not really sure what to do here? Just log an error, increment
     // some error and move on?
+    //
+    // The LLM code extracted a gap size from it? Might be useful, but we
+    // run in fail mode anyhow, so that should get noticed.
+    //
+    // Close the batch and wipe out pending?
 }
 
 
 SharedFastPublisher::SharedFastPublisher(std::shared_ptr<Connection> conn, FastPublisherOptions opts)
     : FastPublisher(std::move(conn), std::move(opts)) {
     debug("SharedFastPublisher constructor this=%p", this);
+}
+
+
+PooledFastPublisher::PooledFastPublisher(std::shared_ptr<Connection> conn, size_t pool_size, FastPublisherOptions opts)
+    : FastPublisher(std::move(conn), std::move(opts)), pool_size(pool_size) {
+    debug("PooledFastPublisher constructor this=%p", this);
+
+    if ( pool_size == 0 )
+        throw std::logic_error("pool_size 0 is invalid");
+
+    pool.resize(pool_size);
+}
+
+
+bool PooledFastPublisher::IsIdle() const {
+    bool result = true;
+    std::scoped_lock lock{mtx};
+
+    for ( const auto& sp : pool )
+        if ( sp )
+            result &= sp->IsIdle();
+
+    return result;
+}
+
+
+Result PooledFastPublisher::AddMsgs(const char* subject, std::span<std::span<const char>> msgs,
+                                    CompletionCallback ccb) {
+    SharedFastPublisher* sp = nullptr;
+    {
+        // Select one of the shared publishers under the lock.
+        //
+        // This may not be optimal.
+        std::scoped_lock lock{mtx};
+        if ( ! pool[pool_index] )
+            pool[pool_index] = std::make_shared<SharedFastPublisher>(conn, opts);
+
+        sp = pool[pool_index].get();
+        pool_index = (pool_index + 1) % pool.size();
+    }
+
+    // Go via AddMsgs() of the pooled shared publisher.
+    return sp->AddMsgs(subject, msgs, ccb);
+}
+
+
+Result PooledFastPublisher::CloseAllBatches(bool commit) {
+    Result all_result = Ok();
+    std::scoped_lock lock{mtx};
+    for ( const auto& sp : pool ) {
+        if ( sp ) {
+            auto result = sp->CloseBatch(commit);
+            auto ok = std::get<0>(result);
+            if ( ! ok )
+                all_result = result;
+        }
+    }
+
+    return all_result;
 }

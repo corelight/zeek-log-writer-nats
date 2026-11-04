@@ -134,18 +134,23 @@ export {
 		BATCH_EXCLUSIVE,
 		# A single batch is shared across all logging threads.
 		BATCH_SHARED,
-
-		# Some ideas
-		# BATCH_SUBJECT,
-		# BATCH_STREAM,
-		# BATCH_RR,  round-robin with a fixed number of batches?
+		# A fixed number of batches is used for all logging threads
+		# with a round-robin mechanism.
+		BATCH_POOLED,
 	};
 
-	global fast_publish_batch_policy = BATCH_EXCLUSIVE &redef;
-
 	# Options when using Log::WRITER_NATS_FAST
-	global fast_publish_flow = 100 &redef;
-	global fast_publish_max_batch_size = 1000 &redef;
-	global fast_publish_max_outstanding_acks = 16 &redef;
-	global fast_publish_commit_timeout = 5sec &redef;
+	global fast_publish_batch_policy = BATCH_SHARED &redef;
+	global fast_publish_flow = 1000 &redef;
+
+	# Unlimited batch size. Only close/commit when idle.
+	global fast_publish_max_batch_size = 0 &redef;
+	global fast_publish_max_outstanding_acks = 3  &redef;
+	global fast_publish_ack_timeout = 5sec &redef;
+
+	# This is used during shutdown, so should be fast.
+	global fast_publish_commit_timeout = 1sec &redef;
+
+	# How many batches to open when using the BATCH_POOLED policy.
+	global fast_publish_pool_size = 4 &redef;
 }
