@@ -2,6 +2,8 @@
 
 #include <nats/nats.h>
 #include <nats/status.h>
+#include <chrono>
+#include <thread>
 
 #include "Connection.h"
 #include "NATS.h"
@@ -67,11 +69,12 @@ NATSFastPublishWriter::NATSFastPublishWriter(WriterFrontend* frontend)
 
 bool NATSFastPublishWriter::DoWrites(int num_fields, const threading::Field* const* fields,
                                      std::span<zeek::logging::detail::LogRecord> records) {
-    //
-    // We should stall here unless we're being shutdown.
-    //
-    if ( ! Conn()->IsConnected() ) {
-        // Add a DropWrites() helper?
+    // Stall until connected or thread is stopped.
+    while ( ! Conn()->IsConnected() && ! Stopping() )
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+
+    if ( ! Conn()->IsConnected() && Stopping() ) {
+        // Alright, thread is stopping and we're not connected, tough luck, drop the writes.
         writer_stats->dropped_writes += (records.size() - 1);
         DropWrite(NATS_NOT_YET_CONNECTED, "not yet connected");
         return true;
