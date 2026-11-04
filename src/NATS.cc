@@ -82,8 +82,6 @@ NATSWriter::NATSWriter(WriterFrontend* frontend, bool send_heartbeats)
 }
 
 NATSWriter::~NATSWriter() {
-    debug("destructor");
-
     if ( js )
         jsCtx_Destroy(js);
 
@@ -406,7 +404,7 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
 }
 
 bool NATSWriter::Format(ODesc& out, int num_fields, const threading::Field* const* fields, threading::Value** vals) {
-    desc.Clear();
+    out.Clear();
     return formatter->Describe(&out, num_fields, fields, vals);
 }
 
