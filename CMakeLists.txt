@@ -44,7 +44,9 @@ set(CMAKE_REQUIRED_FLAGS ${ZEEK_CXX_FLAGS})
 set(CMAKE_REQUIRED_INCLUDES ${ZEEK_INCLUDE_DIRS})
 # Do not try to link the below.
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
-check_source_compiles(CXX [[
+check_source_compiles(
+    CXX
+    [[
     #include <zeek/logging/WriterBackend.h>
 
     class TestBackend : public zeek::logging::WriterBackend {
@@ -66,7 +68,8 @@ check_source_compiles(CXX [[
         }
     };
 
-]] HAVE_WRITER_BACKEND_DO_WRITES_AND_STOPPING)
+]]
+    HAVE_WRITER_BACKEND_DO_WRITES_AND_STOPPING)
 cmake_pop_check_state()
 
 zeek_plugin_begin(Zeek Log_Writer_NATS)
@@ -74,7 +77,7 @@ zeek_plugin_cc(src/Plugin.cc)
 zeek_plugin_cc(src/Connection.cc)
 zeek_plugin_cc(src/NATS.cc)
 zeek_plugin_cc(src/NATSCoreWriter.cc)
-if ( HAVE_WRITER_BACKEND_DO_WRITES_AND_STOPPING )
+if (HAVE_WRITER_BACKEND_DO_WRITES_AND_STOPPING)
     zeek_plugin_cc(src/NATSFastPublishWriter.cc)
 endif ()
 
@@ -87,9 +90,10 @@ zeek_plugin_end()
 
 target_link_libraries(${plugin_target} PRIVATE jetstream_extra_static)
 
-if(HAVE_WRITER_BACKEND_DO_WRITES_AND_STOPPING)
-    target_compile_definitions(${plugin_target} PRIVATE HAVE_WRITER_BACKEND_DO_WRITES_AND_STOPPING=1)
-endif()
+if (HAVE_WRITER_BACKEND_DO_WRITES_AND_STOPPING)
+    target_compile_definitions(${plugin_target}
+                               PRIVATE HAVE_WRITER_BACKEND_DO_WRITES_AND_STOPPING=1)
+endif ()
 
 if ("${PROJECT_SOURCE_DIR}" STREQUAL "${CMAKE_SOURCE_DIR}")
     # Allows building rpm/deb packages via "make package" in build dir.
