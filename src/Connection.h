@@ -110,6 +110,13 @@ public:
     uint64_t Epoch() { return epoch; }
 
     /**
+     * Whether this connection is currently connected.
+     *
+     * Used to circuit break;
+     */
+    bool IsConnected() const { return is_connected; }
+
+    /**
      * Publish the given low-level message on the underlying natsConnection.
      */
     Result Publish(natsMsg* msg);
@@ -144,6 +151,8 @@ protected:
 
 private:
     std::atomic<uint64_t> epoch{0};
+    std::atomic<bool> is_connected{false};
+
     static std::mutex connections_mtx;
     static std::map<std::string, std::weak_ptr<Connection>> connections;
 };

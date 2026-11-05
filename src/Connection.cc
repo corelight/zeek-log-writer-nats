@@ -209,6 +209,7 @@ Result Connection::StartConnect() {
         // Initialize epoch with 1 if it's already ready, otherwise
         // the connect_cb will set epoch appropriately.
         epoch = s == NATS_NOT_YET_CONNECTED ? 0 : 1;
+        is_connected = epoch == 1;
 
         // Log a connected messages - happens in connected_cb otherwise.
         if ( epoch == 1 )
@@ -236,22 +237,26 @@ void Connection::ConnectionCallback(natsConnection* nc, ConnectionCallbackType t
             if ( epoch != 0 )
                 eprintf("Unexpected epoch in CONNECTED callback! %" PRIu64, epoch.load());
             epoch = 1;
+            is_connected = true;
 
             eprintf("Connected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
             break;
         }
         case ConnectionCallbackType::RECONNECTED: {
             ++epoch;
+            is_connected = true;
             eprintf("Reconnected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
             break;
         }
         case ConnectionCallbackType::DISCONNECTED: {
             eprintf("Disconnected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
+            is_connected = false;
             break;
         }
         case ConnectionCallbackType::CLOSED: {
             // This happens at shutdown.
             eprintf("Closed [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
+            is_connected = false;
 
             if ( epoch == 0 ) {
                 // XXX: Should only get here if the initial connection wasn't
