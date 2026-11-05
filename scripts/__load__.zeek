@@ -29,6 +29,9 @@ export {
 		PUBLISH_MODE_CORE,
 		# js_PublishAsyncMsg() style including ack processing. Heavy.
 		PUBLISH_MODE_ASYNC,
+		# Fast-ingest batch publish.
+		# https://docs.nats.io/learn/jetstream/advanced-publishing#fast-ingest-batch-publish
+		PUBLISH_MODE_FAST,
 	};
 
 	global url: string = "nats://localhost:4222" &redef;
@@ -125,4 +128,28 @@ export {
 
 	# Amount of time to wait for async publish at shutdown.
 	global publish_async_complete_max_wait: interval = 1000msec &redef;
+
+	type FastPublishBatchPolicy: enum {
+		# Each logging thread receives its own batch.
+		BATCH_EXCLUSIVE,
+		# A single batch is shared across all logging threads.
+		BATCH_SHARED,
+	};
+
+	# Options when using Log::WRITER_NATS_FAST
+	global fast_publish_batch_policy = BATCH_SHARED &redef;
+
+	# Default Flow value used to create ADR-50 batches.
+	global fast_publish_flow = 1000 &redef;
+
+	# Number of outstanding acks. This value time the flow value
+	# is the maximum number of log records outstanding at any
+	# point in time.
+	global fast_publish_max_outstanding_acks = 3  &redef;
+
+	# How long to wait for an ACK from the server.
+	global fast_publish_ack_timeout = 5sec &redef;
+
+	# Timeout when committing a batch (when idle or finished)
+	global fast_publish_commit_timeout = 1sec &redef;
 }
