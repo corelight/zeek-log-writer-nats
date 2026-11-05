@@ -382,18 +382,10 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
         return true;
     }
 
-    desc.Clear();
-    if ( ! formatter->Describe(&desc, num_fields, fields, vals) ) {
-        DropWrite(NATS_ERR, "formatter describe failed");
-        return true;
-    }
+    natsMsg* msg = nullptr;
 
-    const char* data = (const char*)desc.Bytes();
-    int data_len = desc.Size();
-
-    natsMsg* msg;
-    if ( s = natsMsg_Create(&msg, publish_subject.c_str(), nullptr /*reply*/, data, data_len); s != NATS_OK ) {
-        DropWrite(s, "failed to create message");
+    if ( ! FormatMessage(&msg, num_fields, fields, vals) ) {
+        DropWrite(NATS_ERR, "FormatMessage() failed");
         return true;
     }
 
