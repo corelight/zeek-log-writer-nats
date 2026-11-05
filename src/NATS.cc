@@ -15,7 +15,8 @@
 using namespace zeek::logging;
 using namespace zeek::plugin::Zeek_Log_Writer_NATS::detail;
 
-NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*send_heartbeats=*/false) {
+NATSWriter::NATSWriter(WriterFrontend* frontend)
+    : WriterBackend(frontend), writer_stats(std::make_shared<NATSWriterStats>()) {
     // Initialize the NATS metrics with callbacks that use
     // the embedded WriterStats in in a NATSWriter instance.
     std::vector<telemetry::LabelView> labels = {{"filter-name", frontend->GetFilterName()},
@@ -24,31 +25,31 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*sen
     dropped_writes_total = zeek::telemetry_mgr->CounterInstance(
         "zeek", "nats-log-writer-backend-dropped-writes", labels,
         "Dropped log writes of the NATS log writer because of connectivity issues or other problems.", "",
-        [stats = &writer_stats]() { return static_cast<double>(stats->dropped_writes); }),
+        [stats = writer_stats]() { return static_cast<double>(stats->dropped_writes); }),
 
     publish_errors_total =
         zeek::telemetry_mgr
             ->CounterInstance("zeek", "nats-log-writer-backend-publish-errors", labels,
                               "Publish errors reported from the NATS server via the installed AckHandler", "",
-                              [stats = &writer_stats]() { return static_cast<double>(stats->publish_errors); }),
+                              [stats = writer_stats]() { return static_cast<double>(stats->publish_errors); }),
 
     publish_timeouts_total =
         zeek::telemetry_mgr
             ->CounterInstance("zeek", "nats-log-writer-backend-publish-timeouts", labels,
                               "Publish timeouts when publish_async_max_wait or publish_async_stall_wait_ms were hit",
-                              "", [stats = &writer_stats]() { return static_cast<double>(stats->publish_timeouts); }),
+                              "", [stats = writer_stats]() { return static_cast<double>(stats->publish_timeouts); }),
 
     publish_acks_total =
         zeek::telemetry_mgr->CounterInstance("zeek", "nats-log-writer-backend-publish-acks", labels,
                                              "Publish acknowledgements reported via the installed AckHandler", "",
-                                             [stats = &writer_stats]() {
+                                             [stats = writer_stats]() {
                                                  return static_cast<double>(stats->publish_acks);
                                              });
 
     publishes_pending =
         zeek::telemetry_mgr->GaugeInstance("zeek", "nats-log-writer-backend-publishes-pending", labels,
                                            "In-flight publishes neither confirmed nor failed", "",
-                                           [stats = &writer_stats]() { return static_cast<double>(stats->pending); });
+                                           [stats = writer_stats]() { return static_cast<double>(stats->pending); });
 
     // Read script-layer globals on the main thread. DoInit runs in the writer
     // backend thread where global_scope() is not safe to access.
@@ -81,8 +82,6 @@ NATSWriter::NATSWriter(WriterFrontend* frontend) : WriterBackend(frontend, /*sen
 }
 
 NATSWriter::~NATSWriter() {
-    debug("destructor");
-
     if ( js )
         jsCtx_Destroy(js);
 
@@ -157,15 +156,15 @@ std::string escape_path(const std::string& path, const char* prefix) {
 } // namespace
 
 void NATSWriter::PublishAck(const char* stream, uint64_t sequence, const char* domain, bool duplicate) {
-    ++writer_stats.publish_acks;
+    ++writer_stats->publish_acks;
 }
 
 void NATSWriter::PublishError(natsStatus err, int js_err, const char* text) {
-    auto errors = ++writer_stats.publish_errors;
+    auto errors = ++writer_stats->publish_errors;
 
     // Track timeouts as a separate metric.
     if ( err == NATS_TIMEOUT )
-        ++writer_stats.publish_timeouts;
+        ++writer_stats->publish_timeouts;
 
     if ( publish_error_log == 0 )
         return;
@@ -179,7 +178,7 @@ void NATSWriter::PublishError(natsStatus err, int js_err, const char* text) {
 
 
 void NATSWriter::DropWrite(natsStatus err, const char* text) {
-    auto dropped_writes = ++writer_stats.dropped_writes;
+    auto dropped_writes = ++writer_stats->dropped_writes;
 
     if ( dropped_writes_log == 0 )
         return;
@@ -191,7 +190,6 @@ void NATSWriter::DropWrite(natsStatus err, const char* text) {
 
 bool NATSWriter::DoInit(const WriterInfo& info, int arg_num_fields, const threading::Field* const* arg_fields) {
     debug("DoInit %s", info.path);
-    natsStatus s = NATS_OK;
 
     for ( const auto& [name, value] : info.config ) {
         if ( zeek::util::streq(name, "url") ) {
@@ -373,7 +371,6 @@ bool NATSWriter::Connect() {
 
 bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, threading::Value** vals) {
     natsStatus s = NATS_OK;
-    jsErrCode jerr;
 
     if ( ! Connect() ) {
         DropWrite(NATS_NOT_YET_CONNECTED, "not yet connected in DoWrite()");
@@ -385,18 +382,10 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
         return true;
     }
 
-    desc.Clear();
-    if ( ! formatter->Describe(&desc, num_fields, fields, vals) ) {
-        DropWrite(NATS_ERR, "formatter describe failed");
-        return true;
-    }
+    natsMsg* msg = nullptr;
 
-    const char* data = (const char*)desc.Bytes();
-    int data_len = desc.Size();
-
-    natsMsg* msg;
-    if ( s = natsMsg_Create(&msg, publish_subject.c_str(), nullptr /*reply*/, data, data_len); s != NATS_OK ) {
-        DropWrite(s, "failed to create message");
+    if ( ! FormatMessage(&msg, num_fields, fields, vals) ) {
+        DropWrite(NATS_ERR, "FormatMessage() failed");
         return true;
     }
 
@@ -412,6 +401,23 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     natsMsg_Destroy(msg);
 
     return true;
+}
+
+bool NATSWriter::Format(ODesc& out, int num_fields, const threading::Field* const* fields, threading::Value** vals) {
+    out.Clear();
+    return formatter->Describe(&out, num_fields, fields, vals);
+}
+
+bool NATSWriter::FormatMessage(natsMsg** msg, int num_fields, const threading::Field* const* fields,
+                               threading::Value** vals) {
+    if ( ! Format(desc, num_fields, fields, vals) )
+        return false;
+
+    const char* data = reinterpret_cast<const char*>(desc.Bytes());
+    int data_len = desc.Size();
+
+    natsStatus s = natsMsg_Create(msg, PublishSubject().c_str(), /*reply=*/nullptr, data, data_len);
+    return s == NATS_OK;
 }
 
 bool NATSWriter::DoRotate(const char* rotated_path, double open, double close, bool terminating) {
@@ -446,7 +452,7 @@ bool NATSWriter::DoFinish(double network_time) {
         natsMsgList pending;
         if ( s = js_PublishAsyncGetPendingList(&pending, js); s == NATS_OK ) {
             eprintf("%s: DoFinish: Had %d pending messages", Info().path, pending.Count);
-            writer_stats.dropped_writes += pending.Count;
+            writer_stats->dropped_writes += pending.Count;
 
             natsMsgList_Destroy(&pending);
         }

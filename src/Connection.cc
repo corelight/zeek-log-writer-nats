@@ -1,5 +1,6 @@
 #include "Connection.h"
 
+#include <fast_publish.h>
 #include <nats/nats.h>
 #include <nats/status.h>
 #include <nats/version.h>
@@ -209,6 +210,7 @@ Result Connection::StartConnect() {
         // Initialize epoch with 1 if it's already ready, otherwise
         // the connect_cb will set epoch appropriately.
         epoch = s == NATS_NOT_YET_CONNECTED ? 0 : 1;
+        is_connected = epoch == 1;
 
         // Log a connected messages - happens in connected_cb otherwise.
         if ( epoch == 1 )
@@ -236,22 +238,26 @@ void Connection::ConnectionCallback(natsConnection* nc, ConnectionCallbackType t
             if ( epoch != 0 )
                 eprintf("Unexpected epoch in CONNECTED callback! %" PRIu64, epoch.load());
             epoch = 1;
+            is_connected = true;
 
             eprintf("Connected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
             break;
         }
         case ConnectionCallbackType::RECONNECTED: {
             ++epoch;
+            is_connected = true;
             eprintf("Reconnected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
             break;
         }
         case ConnectionCallbackType::DISCONNECTED: {
             eprintf("Disconnected [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
+            is_connected = false;
             break;
         }
         case ConnectionCallbackType::CLOSED: {
             // This happens at shutdown.
             eprintf("Closed [pid=%d natsConn=%p epoch=%" PRIu64 "]", getpid(), natsConn, epoch.load());
+            is_connected = false;
 
             if ( epoch == 0 ) {
                 // XXX: Should only get here if the initial connection wasn't
@@ -352,6 +358,47 @@ Result Connection::Publish(natsMsg* msg) {
 }
 
 
+FastPublisherPtr Connection::GetFastPublisher(FastPublishBatchPolicy policy, FastPublisherOptions opts) {
+    if ( policy == FastPublishBatchPolicy::EXCLUSIVE )
+        return std::make_shared<FastPublisher>(shared_from_this(), std::move(opts));
+    else if ( policy == FastPublishBatchPolicy::SHARED ) {
+        {
+            // Should't be hot.
+            std::scoped_lock lock{mtx};
+            if ( ! shared_publisher )
+                shared_publisher = std::make_shared<SharedFastPublisher>(shared_from_this(), std::move(opts));
+
+            return shared_publisher;
+        }
+    }
+
+    eprintf("Unexpected\n");
+    abort();
+
+    return nullptr;
+}
+
+
+void Connection::PutFastPublisher(FastPublisherPtr&& fp) {
+    // Should't be hot.
+    std::scoped_lock lock{mtx};
+
+    if ( fp == shared_publisher ) {
+        fp.reset();
+
+        if ( shared_publisher.use_count() == 1 ) {
+            debug("Releasing shared_publisher!");
+            shared_publisher->CloseBatch(/*commit=*/true);
+            shared_publisher.reset();
+        }
+    }
+    else {
+        fp->CloseBatch(/*commit=*/true);
+        fp.reset();
+    }
+}
+
+
 Connection::CreateResult Connection::Create(ConnectionSharingPolicy sharing_policy, ConnectionOptions opts) {
     // If exclusive, just hand out a new connection.
     if ( sharing_policy == ConnectionSharingPolicy::EXCLUSIVE ) {
@@ -391,3 +438,243 @@ Connection::CreateResult Connection::Create(ConnectionSharingPolicy sharing_poli
 // Static connection members.
 std::map<std::string, std::weak_ptr<Connection>> Connection::connections;
 std::mutex Connection::connections_mtx;
+
+
+//
+// FastPublisher code below
+//
+
+namespace {
+void fast_publish_err_handler(natsStatus status, const char* description, void* closure) {
+    auto* fast_publisher = static_cast<FastPublisher*>(closure);
+    fast_publisher->ErrorHandler(status, description);
+}
+} // namespace
+
+
+FastPublisher::FastPublisher(std::shared_ptr<Connection> conn, FastPublisherOptions opts)
+    : conn(std::move(conn)), opts(std::move(opts)), idle_ts(nats_Now()) {}
+
+
+FastPublisher::~FastPublisher() {
+    debug("FastPublisher destructor this=%p fp_ctx=%p pending=%zu", this, fp_ctx, pending.size());
+}
+
+
+void FastPublisher::ProcessPending() {
+    auto it = pending.begin();
+
+    while ( it != pending.end() ) {
+        auto& entry = *it;
+
+        if ( last_ack_seq < (entry.seq + entry.len - 1) )
+            break;
+
+        // entry.seq + entry.len was acked by server.
+        entry.completion_callback(CompletionInfo{NATS_OK, /*acked=*/entry.len, /*dropped=*/0, /*failed=*/0});
+
+        it = pending.erase(it);
+    }
+}
+
+void FastPublisher::FailPending() {
+    auto it = pending.begin();
+    while ( it != pending.end() ) {
+        auto& entry = *it;
+        entry.completion_callback(CompletionInfo{NATS_ERR, /*acked=*/0, /*dropped=*/0, /*failed=*/entry.len});
+        it = pending.erase(it);
+    }
+}
+
+
+Result FastPublisher::OpenBatch() {
+    natsStatus s = NATS_OK;
+
+    jsFastPublisherOptions fp_opts;
+    if ( s = jsFastPublisherOptions_Init(&fp_opts); s != NATS_OK )
+        return Error(s, "failed to create options");
+
+    fp_opts.ErrHandler = fast_publish_err_handler;
+    fp_opts.ErrHandlerClosure = this; // do we also need some callback state as indirection here?
+    fp_opts.Flow = opts.flow;
+    fp_opts.MaxOutstandingAcks = opts.max_outstanding_acks;
+    fp_opts.ContinueOnGap = opts.continue_on_gap;
+
+    natsConnection* nc = conn->RawConnection();
+
+    /**
+     * jsFastPublishCtx_Create() does not do remote calls, only
+     * prepares the context.
+     */
+    if ( s = jsFastPublishCtx_Create(&fp_ctx, nc, &fp_opts); s != NATS_OK ) {
+        std::string error = nats_GetLastError(nullptr);
+        return Error(s, error);
+    }
+
+    fp_epoch = conn->Epoch();
+
+    return Ok();
+}
+
+
+Result FastPublisher::CloseBatchImpl(bool commit) {
+    if ( ! fp_ctx )
+        return Ok();
+
+    natsStatus s = NATS_OK;
+
+    if ( commit && ! jsFastPublish_IsClosed(fp_ctx) ) {
+        jsPubAck* pub_ack = nullptr;
+        debug("CloseBatch: this=%p last_batch_seq=%" PRIu64 " last_ack_seq=%" PRIu64, this, last_batch_seq,
+              last_ack_seq);
+
+        if ( s = jsFastPublish_Close(&pub_ack, fp_ctx, opts.commit_timeout_ms); s == NATS_OK ) {
+            debug("CloseBatch: this=%p jsPubAck: Sequence=%" PRIu64 " Count=%" PRIu64, this, pub_ack->Sequence,
+                  pub_ack->Count);
+
+            // Is this valid? This is not valid. Sequence is the stream sequence.
+            // last_batch_seq = pub_ack->Sequence;
+
+            // This may not be valid in the face of gaps? I guess?
+            last_ack_seq = pub_ack->Count;
+
+            jsPubAck_Destroy(pub_ack);
+            pub_ack = nullptr;
+
+            // TODO: It'd be nice to get the last Sequence and Ack here!
+            ProcessPending();
+        }
+        else {
+            std::string status_str = natsStatus_GetText(s);
+            eprintf("CloseBatch: this=%p jsFastPublish_Close() failed: %s", this, status_str.c_str());
+        }
+    }
+
+    if ( pending.size() > 0 ) {
+        eprintf("CloseBatch: this=%p Failing %zu pending entries last_ack_seq=%" PRIu64, this, pending.size(),
+                last_ack_seq);
+        for ( const auto& p : pending ) {
+            debug("Failing: seq=%" PRIu64 " len=%" PRIu64 "\n", p.seq, p.len);
+        }
+        FailPending();
+
+        assert(pending.size() == 0);
+    }
+
+    jsFastPublish_Destroy(fp_ctx);
+    fp_ctx = nullptr;
+    last_batch_seq = 0;
+    last_ack_seq = 0;
+
+    return Ok();
+}
+
+
+Result FastPublisher::AddMsgsImpl(const char* subject, std::span<std::span<const char>> msgs, CompletionCallback ccb) {
+    natsStatus s = NATS_OK;
+
+    if ( fp_ctx && (conn->Epoch() != fp_epoch || ! conn->IsConnected()) ) {
+        CloseBatchImpl(/*commit=*/false);
+        FailPending();
+    }
+
+    // Don't try to do anything if the connection isn't up. We'll just run
+    // into timeouts and then Zeek starts dropping log writes anyhow.
+    if ( ! conn->IsConnected() ) {
+        ccb(CompletionInfo{NATS_NOT_YET_CONNECTED, /*dropped=*/msgs.size(), /*failed=*/0});
+        return Error(NATS_NOT_YET_CONNECTED, "not yet connected");
+    }
+
+
+    // If we do not have a batch open, open it now.
+    //
+    // TODO: Maybe introduce a EnsureOpenBatch() helper here so it
+    // doesn't look so messy.
+    if ( ! fp_ctx ) {
+        if ( const auto& [ok, status, error] = OpenBatch(); ! ok ) {
+            // This should never fail. It just allocates some memory.
+            eprintf("ERROR: OpenBatch() failed: %s", error->c_str());
+            ccb(CompletionInfo{status, /*acked=*/0, /*dropped=*/0, /*failed=*/msgs.size()});
+            return Error(status, "failed to open batch");
+        }
+    }
+
+    uint64_t initial_seq = 0;
+    jsFastPubAck fast_pub_ack = {0, 0};
+
+    // debug("publishing %zu", msgs.size());
+
+    for ( const auto& msg : msgs ) {
+        const void* data = msg.data();
+        int data_len = msg.size();
+
+        // This will block when too many messages are in-flight,
+        // or the server has gone out for lunch.
+        s = jsFastPublish_Add(&fast_pub_ack, fp_ctx, subject, data, data_len, /*opts=*/nullptr);
+
+        if ( s != NATS_OK ) {
+            const char* status = natsStatus_GetText(s);
+            eprintf("XXX: this=%p jsFastPublish_Add() failed with: %s", this, status);
+
+            // Just report the whole batch as failed if anything
+            // in the batch failed.
+            ccb(CompletionInfo{s, /*acked=*/0, /*dropped=*/0, /*failed=*/msgs.size()});
+
+            std::string error = natsStatus_GetText(s);
+
+            // Caller must call CloseBatchImpl()
+            return Error(s, error);
+        }
+
+        if ( initial_seq == 0 )
+            initial_seq = fast_pub_ack.BatchSequence;
+
+        last_batch_seq = fast_pub_ack.BatchSequence;
+        last_ack_seq = fast_pub_ack.AckSequence;
+    }
+
+    if ( initial_seq == 0 ) {
+        // Should never get here.
+        eprintf("ERROR: initial_seq was never set?");
+        ccb(CompletionInfo{NATS_ERR, /*acked=*/0, /*dropped=*/0, /*failed=*/msgs.size()});
+        return Ok();
+    }
+
+    // We did add something to the batch, so definitely not idle anymore.
+    idle_ts = nats_Now();
+
+    // Add all messages to the pending list and immediately run
+    // ProcessPending() to invoke pending callbacks for anything
+    // that was acked during the jsFastPublish_Add() for this or
+    // prior AddMsgs() calls.
+    pending.emplace_back(Pending{
+        .seq = initial_seq,
+        .len = msgs.size(),
+        .completion_callback = std::move(ccb),
+    });
+
+    ProcessPending();
+
+    return Ok();
+}
+
+
+void FastPublisher::ErrorHandler(natsStatus status, const char* description) {
+    // Not really sure what to do here? Just log an error, increment
+    // some error and move on?
+    //
+    // The LLM code extracted a gap size from it? Might be useful, but we
+    // run in fail mode anyhow, so this should get noticed during the
+    // jsFastPublish_Add() calls instead.
+    //
+    // Close the batch and wipe out pending?
+
+    const char* status_str = natsStatus_GetText(status);
+    eprintf("XXX XXX XXX FastPublisher::ErrorHandler: %s: %s this=%p XXX XXX XXX", status_str, description, this);
+}
+
+
+SharedFastPublisher::SharedFastPublisher(std::shared_ptr<Connection> conn, FastPublisherOptions opts)
+    : FastPublisher(std::move(conn), std::move(opts)) {
+    debug("SharedFastPublisher constructor this=%p", this);
+}

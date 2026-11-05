@@ -44,13 +44,13 @@ public:
     // to actively drop, rather than hit libnats limits.
     void DropWrite(natsStatus err, const char* text);
 
-    void IncrementPending() { ++writer_stats.pending; }
-    void DecrementPending() { --writer_stats.pending; }
+    void IncrementPending() { ++writer_stats->pending; }
+    void DecrementPending() { --writer_stats->pending; }
 
     // Return true if this write should be dropped to prevent stalling.
     bool MayStall() const {
         if ( publish_async_no_stall && publish_async_max_pending > 0 )
-            return writer_stats.pending >= publish_async_max_pending;
+            return writer_stats->pending >= publish_async_max_pending;
 
         return false;
     };
@@ -64,6 +64,16 @@ protected:
     bool DoFinish(double network_time) override;
     bool DoHeartbeat(double network_time, double current_time) override;
 
+    /**
+     * Format vals as JSON into ODesc out, which is cleared first.
+     */
+    bool Format(zeek::ODesc& out, int num_fields, const threading::Field* const* fields, threading::Value** vals);
+
+    /**
+     * Similar to Format(), but creates a new natsMsg.
+     */
+    bool FormatMessage(natsMsg** out, int num_fields, const threading::Field* const* fields, threading::Value** vals);
+
     // Try connect and setup the stream.
     bool Connect();
 
@@ -74,6 +84,8 @@ protected:
     zeek::ODesc& Desc() { return desc; }
 
     std::shared_ptr<Connection>& Conn() { return conn; }
+
+    std::shared_ptr<NATSWriterStats> writer_stats;
 
 private:
     std::shared_ptr<Connection> conn = nullptr;
@@ -102,7 +114,6 @@ private:
     std::string json_timestamps;
     std::string path_escape_policy;
 
-    NATSWriterStats writer_stats;
     zeek_uint_t publish_error_log;
     zeek_uint_t dropped_writes_log;
     int64_t publish_async_max_pending;
