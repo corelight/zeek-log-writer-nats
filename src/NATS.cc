@@ -411,6 +411,23 @@ bool NATSWriter::DoWrite(int num_fields, const threading::Field* const* fields, 
     return true;
 }
 
+bool NATSWriter::Format(ODesc& out, int num_fields, const threading::Field* const* fields, threading::Value** vals) {
+    out.Clear();
+    return formatter->Describe(&out, num_fields, fields, vals);
+}
+
+bool NATSWriter::FormatMessage(natsMsg** msg, int num_fields, const threading::Field* const* fields,
+                               threading::Value** vals) {
+    if ( ! Format(desc, num_fields, fields, vals) )
+        return false;
+
+    const char* data = reinterpret_cast<const char*>(desc.Bytes());
+    int data_len = desc.Size();
+
+    natsStatus s = natsMsg_Create(msg, PublishSubject().c_str(), /*reply=*/nullptr, data, data_len);
+    return s == NATS_OK;
+}
+
 bool NATSWriter::DoRotate(const char* rotated_path, double open, double close, bool terminating) {
     debug("DoRotate");
     FinishedRotation();
